@@ -1,0 +1,192 @@
+version: "1"
+
+# ──────────────────────────────────────────────────────────────
+# Teams
+# ──────────────────────────────────────────────────────────────
+teams:
+  platform:
+    name: Platform Team
+
+  data-eng:
+    name: Data Engineering
+
+# ──────────────────────────────────────────────────────────────
+# Monitors — passive: your jobs ping these endpoints
+# ──────────────────────────────────────────────────────────────
+monitors:
+  db-backup:
+    name: Database Backup
+    description: Nightly Postgres backup to S3
+    schedule: "0 2 * * *"
+    graceSeconds: 600
+    maxRuntimeSeconds: 3600
+    tags: [backup, critical]
+    team: platform
+    logRetentionDays: 90
+    alerts:
+      - channel: slack
+        destination: "#ops-alerts"
+        config:
+          mentionGroup: "@oncall"
+        cooldownMinutes: 60
+        thresholdFailures: 2
+
+      - channel: pagerduty
+        destination: service-key-abc123
+        thresholdFailures: 3
+
+  heartbeat-api:
+    name: API Heartbeat
+    description: Pings every 60s from the API health check
+    intervalSeconds: 60
+    graceSeconds: 120
+    team: platform
+    alerts:
+      - channel: email
+        destination: oncall@company.com
+
+# ──────────────────────────────────────────────────────────────
+# Jobs — active: Kast calls these URLs on a schedule
+# ──────────────────────────────────────────────────────────────
+jobs:
+  sync-inventory:
+    name: Sync Inventory
+    description: Pull latest inventory from warehouse API
+    schedule: "0 */6 * * *"
+    timezone: America/New_York
+    url: https://warehouse.internal/api/sync
+    method: POST
+    headers:
+      Authorization: "Bearer ${WAREHOUSE_TOKEN}"
+      Content-Type: application/json
+    body: '{"mode": "incremental"}'
+    timeoutSeconds: 120
+    tags: [inventory, data]
+    team: data-eng
+    monitor: db-backup
+    retry:
+      maxRetries: 3
+      delaySeconds: 30
+      backoffMultiplier: 2
+      maxDelaySeconds: 600
+    concurrency:
+      limit: 1
+      policy: skip
+    successStatusCodes: [200, 202]
+
+  # ── Job with a multi-step workflow ────────────────────────
+  weekly-report:
+    name: Weekly Report Pipeline
+    description: Generate and deliver weekly analytics report
+    schedule: "0 9 * * 1"
+    url: https://reports.internal/api/trigger
+    method: POST
+    timeoutSeconds: 60
+    tags: [reports]
+    team: data-eng
+    retry:
+      maxRetries: 2
+      delaySeconds: 60
+      backoffMultiplier: 2
+      maxDelaySeconds: 300
+
+    workflow:
+      steps:
+        # Step 1: Fetch data from analytics API
+        - id: fetch-data
+          name: Fetch Report Data
+          type: run
+          config:
+            url: https://analytics.internal/api/report-data
+            method: GET
+            timeoutSeconds: 30
+            successStatusCodes: [200]
+          retryPolicy:
+            maxAttempts: 3
+            delaySeconds: 10
+            backoffMultiplier: 2
+          onFailure: abort
+
+        # Step 2: Wait for data processing
+        - id: wait-processing
+          name: Wait for data processing
+          type: sleep
+          config:
+            duration: PT30S
+
+        # Step 3: Generate reports in parallel (fan-out)
+        - id: generate-reports
+          name: Generate Reports in Parallel
+          type: fan_out
+          config:
+            branches:
+              - id: pdf-report
+                name: Generate PDF
+                config:
+                  url: https://reports.internal/api/generate/pdf
+                  method: POST
+                  timeoutSeconds: 120
+              - id: csv-report
+                name: Generate CSV
+                config:
+                  url: https://reports.internal/api/generate/csv
+                  method: POST
+                  timeoutSeconds: 60
+              - id: html-report
+                name: Generate HTML
+                config:
+                  url: https://reports.internal/api/generate/html
+                  method: POST
+                  timeoutSeconds: 60
+            concurrency: 3
+            failFast: true
+
+        # Step 4: Trigger the delivery job and wait for it
+        - id: trigger-delivery
+          name: Trigger Report Delivery
+          type: spawn
+          config:
+            targetJob: deliver-report
+            waitForCompletion: true
+            input:
+              formats: [pdf, csv, html]
+
+        # Step 5: Signal parent that delivery is done
+        - id: notify-complete
+          name: Signal completion
+          type: signal_parent
+          config:
+            payload:
+              status: delivered
+              timestamp: "2024-01-01T00:00:00Z"
+
+        # Step 6: Signal the delivery child with urgency
+        - id: signal-delivery
+          name: Signal delivery child
+          type: signal_child
+          config:
+            spawnStepId: trigger-delivery
+            payload:
+              priority: high
+
+        # Step 7: Wait for external confirmation (e.g. from Slack approval)
+        - id: wait-approval
+          name: Wait for external approval
+          type: wait_for_signal
+          config:
+            timeoutDuration: PT1H
+          onFailure: goto
+          onFailureGoto: fetch-data
+
+  # ── Job that is only spawned by workflows, never runs on cron ──
+  deliver-report:
+    name: Deliver Report
+    description: Sends generated reports to stakeholders (spawned by weekly-report)
+    schedule: "0 0 1 1 *"              # runs yearly Jan 1; effectively manual-only
+    url: https://reports.internal/api/deliver
+    method: POST
+    headers:
+      Content-Type: application/json
+    timeoutSeconds: 300
+    tags: [reports, delivery]
+    team: data-eng

@@ -14,8 +14,8 @@ export async function request(path: string, options?: RequestInit) {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    console.error(`Error ${res.status}: ${(body as any).message ?? res.statusText}`);
-    process.exit(1);
+    const msg = (body as any).message ?? res.statusText;
+    throw new Error(`${res.status} ${options?.method ?? 'GET'} ${path}: ${msg}`);
   }
   return res.json();
 }

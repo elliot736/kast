@@ -1,0 +1,38 @@
+# Kast Configuration
+# All values can be overridden via environment variables.
+
+# API server
+api:
+  port: 3001
+
+# PostgreSQL
+database:
+  url: postgresql://kast:kast@localhost:5432/kast
+
+# Redpanda / Kafka
+kafka:
+  brokers:
+    - localhost:19092
+  clientId: kast-api
+
+# Ping retention
+retention:
+  pingDays: 30       # How long to keep ping records in Postgres
+  eventDays: 7       # How long to keep events in Redpanda
+
+# Schedule evaluation
+schedule:
+  sweepIntervalMs: 60000  # How often to check for missed pings
+
+# Rate limiting
+rateLimit:
+  maxPingsPerMinute: 300  # Per IP
+
+# Notification defaults
+notifications:
+  retryCooldowns:         # Exponential backoff for failed deliveries
+    - 30s
+    - 2m
+    - 15m
+    - 1h
+    - 6h

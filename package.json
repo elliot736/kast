@@ -1,0 +1,19 @@
+{
+  "name": "kast",
+  "private": true,
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "db:generate": "turbo db:generate",
+    "db:migrate": "turbo db:migrate",
+    "test:e2e": "playwright test --config tests/e2e/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "prettier": "^3.4.0",
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@9.15.0"
+}

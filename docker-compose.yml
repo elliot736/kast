@@ -1,0 +1,89 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.1
+    container_name: kast-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:29092
+      - --mode=dev-container
+    ports:
+      - "29092:29092"
+      - "18081:8081"
+      - "18082:8082"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:v2.8.0
+    container_name: kast-redpanda-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    ports:
+      - "28080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+
+  postgres:
+    image: postgres:17
+    container_name: kast-postgres
+    environment:
+      POSTGRES_DB: kast
+      POSTGRES_USER: kast
+      POSTGRES_PASSWORD: kast
+    ports:
+      - "25432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kast"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: kast-api
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://kast:kast@postgres:5432/kast
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_CLIENT_ID: kast-api
+      API_PORT: "3001"
+      NODE_ENV: production
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: kast-web
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    restart: unless-stopped
+
+volumes:
+  redpanda-data:
+  postgres-data:

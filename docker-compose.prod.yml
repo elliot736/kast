@@ -1,0 +1,38 @@
+services:
+  nginx:
+    image: nginx:alpine
+    container_name: kast-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+  redpanda:
+    ports: []
+
+  redpanda-console:
+    profiles: [debug]
+
+  postgres:
+    ports: []
+
+  api:
+    ports: []
+    environment:
+      DATABASE_URL: postgresql://kast:kast@postgres:5432/kast
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_CLIENT_ID: kast-api
+      API_PORT: "3001"
+      NODE_ENV: production
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL:-http://localhost}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+
+  web:
+    ports: []
+    environment:
+      NEXT_PUBLIC_API_URL: ""

@@ -21,7 +21,13 @@ export class WorkflowEventMatcherService implements OnModuleInit {
       CONSUMER_GROUPS.WORKFLOW_SIGNAL_DELIVERY,
       TOPICS.WORKFLOW_SIGNALS.name,
       async ({ message }) => {
-        const signal: WorkflowSignalEvent = JSON.parse(message.value!.toString());
+        let signal: WorkflowSignalEvent;
+        try {
+          signal = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.deliverSignal(signal);
       },
     );

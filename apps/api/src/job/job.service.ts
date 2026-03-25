@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq, and, desc, sql, count, gte } from 'drizzle-orm';
 import { CronExpressionParser } from 'cron-parser';
 import { DRIZZLE, type Database } from '../database/database.provider';
@@ -260,9 +260,15 @@ export class JobService {
   }
 
   private computeNextRunAt(schedule: string, timezone?: string | null): Date {
-    const interval = CronExpressionParser.parse(schedule, {
-      tz: timezone ?? 'UTC',
-    });
-    return interval.next().toDate();
+    try {
+      const interval = CronExpressionParser.parse(schedule, {
+        tz: timezone ?? 'UTC',
+      });
+      return interval.next().toDate();
+    } catch {
+      throw new BadRequestException(
+        `Invalid cron schedule "${schedule}": no matching future date found`,
+      );
+    }
   }
 }

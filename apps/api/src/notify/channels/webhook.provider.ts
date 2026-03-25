@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { AlertTrigger } from '../../redpanda/redpanda.interfaces';
 import type { NotificationResult } from './slack.provider';
+import { validateOutboundUrl } from '../../common/util/url-validator';
 
 @Injectable()
 export class WebhookProvider {
@@ -12,6 +13,8 @@ export class WebhookProvider {
     config: Record<string, unknown>,
   ): Promise<NotificationResult> {
     try {
+      await validateOutboundUrl(destination);
+
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
       };

@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { JobExecutorService } from './job-executor.service';
 import type { JobTriggerEvent } from '../redpanda/redpanda.interfaces';
 
+vi.mock('../common/util/url-validator', () => ({
+  validateOutboundUrl: vi.fn().mockResolvedValue(undefined),
+}));
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 function makeMockRedpanda() {

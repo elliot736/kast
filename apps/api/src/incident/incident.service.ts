@@ -5,6 +5,7 @@ import { TOPICS, CONSUMER_GROUPS } from '../redpanda/redpanda.constants';
 import { DRIZZLE, type Database } from '../database/database.provider';
 import { incidents, monitors } from '../database/schema';
 import type {
+  PingEvent,
   MonitorEvaluation,
   IncidentEvent,
   AlertTrigger,
@@ -26,7 +27,13 @@ export class IncidentService implements OnModuleInit {
       CONSUMER_GROUPS.INCIDENTS,
       TOPICS.MONITOR_EVALUATIONS.name,
       async ({ message }) => {
-        const evaluation: MonitorEvaluation = JSON.parse(message.value!.toString());
+        let evaluation: MonitorEvaluation;
+        try {
+          evaluation = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.handleEvaluation(evaluation);
       },
     );
@@ -36,7 +43,13 @@ export class IncidentService implements OnModuleInit {
       CONSUMER_GROUPS.INCIDENTS_PINGS,
       TOPICS.PING_EVENTS.name,
       async ({ message }) => {
-        const event = JSON.parse(message.value!.toString());
+        let event: PingEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         if (event.type === 'success') {
           await this.resolveOpenIncidents(event.monitorId);
         }

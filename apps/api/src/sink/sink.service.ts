@@ -28,7 +28,13 @@ export class SinkService implements OnModuleInit, OnModuleDestroy {
       CONSUMER_GROUPS.SINK,
       TOPICS.PING_EVENTS.name,
       async ({ message }) => {
-        const event: PingEvent = JSON.parse(message.value!.toString());
+        let event: PingEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         this.buffer.push(event);
         if (this.buffer.length >= BATCH_SIZE) {
           await this.flush();
@@ -45,11 +51,12 @@ export class SinkService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('Sink consumer started');
   }
 
-  onModuleDestroy() {
+  async onModuleDestroy() {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
     }
+    await this.flush();
   }
 
   private async flush() {
@@ -84,6 +91,12 @@ export class SinkService implements OnModuleInit, OnModuleDestroy {
         createdAt: new Date(event.timestamp),
       };
     });
+
+    // Evict stale startTimes (orphaned starts older than 5 minutes)
+    const staleThreshold = Date.now() - 5 * 60 * 1000;
+    for (const [id, time] of this.startTimes) {
+      if (time.getTime() < staleThreshold) this.startTimes.delete(id);
+    }
 
     // Batch insert all pings
     await this.db.insert(pings).values(rows);

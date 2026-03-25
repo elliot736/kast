@@ -20,7 +20,13 @@ export class JobBridgeService implements OnModuleInit {
       CONSUMER_GROUPS.JOB_BRIDGE,
       TOPICS.JOB_RESULTS.name,
       async ({ message }) => {
-        const event: JobResultEvent = JSON.parse(message.value!.toString());
+        let event: JobResultEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.bridge(event);
       },
     );

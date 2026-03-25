@@ -4,11 +4,14 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { json, urlencoded, raw, text } from 'express';
 import { AppModule } from './app.module';
 import { PinoLoggerService } from './common/logger/pino-logger.service';
+import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
 
-  app.useLogger(new PinoLoggerService());
+  const logger = new PinoLoggerService();
+  app.useLogger(logger);
+  app.useGlobalFilters(new GlobalExceptionFilter());
 
   app.use(json({ limit: '1mb' }));
   app.use(urlencoded({ extended: true, limit: '1mb' }));
@@ -39,8 +42,8 @@ async function bootstrap() {
   });
 
   await app.listen(port);
-  console.log(`Kast API running on http://localhost:${port}`);
-  console.log(`Swagger docs at http://localhost:${port}/api/docs`);
+  logger.log(`Kast API running on http://localhost:${port}`);
+  logger.log(`Swagger docs at http://localhost:${port}/api/docs`);
 }
 
 bootstrap();

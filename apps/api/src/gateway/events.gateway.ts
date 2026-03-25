@@ -25,78 +25,34 @@ export class EventsGateway
 
   constructor(private redpanda: RedpandaService) {}
 
+  private safeParse(raw: Buffer | null): Record<string, unknown> | null {
+    try {
+      return JSON.parse(raw!.toString());
+    } catch {
+      return null;
+    }
+  }
+
   async onModuleInit() {
-    // Subscribe to ping events and push to connected browsers
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_PING,
-      TOPICS.PING_EVENTS.name,
-      async ({ message }) => {
+    const subscribe = async (
+      group: string,
+      topic: string,
+      eventName: string,
+    ) => {
+      await this.redpanda.subscribe(group, topic, async ({ message }) => {
         if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('ping', event);
+          const event = this.safeParse(message.value);
+          if (event) this.server.emit(eventName, event);
         }
-      },
-    );
+      });
+    };
 
-    // Subscribe to monitor state changes
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_STATE,
-      TOPICS.MONITOR_STATE.name,
-      async ({ message }) => {
-        if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('monitor-state', event);
-        }
-      },
-    );
-
-    // Subscribe to incident events
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_INCIDENTS,
-      TOPICS.INCIDENT_EVENTS.name,
-      async ({ message }) => {
-        if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('incident', event);
-        }
-      },
-    );
-
-    // Subscribe to job result events
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_JOB_RESULTS,
-      TOPICS.JOB_RESULTS.name,
-      async ({ message }) => {
-        if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('job-run', event);
-        }
-      },
-    );
-
-    // Subscribe to job run log events
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_JOB_LOGS,
-      TOPICS.JOB_RUN_LOGS.name,
-      async ({ message }) => {
-        if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('job-log', event);
-        }
-      },
-    );
-
-    // Subscribe to workflow step result events
-    await this.redpanda.subscribe(
-      CONSUMER_GROUPS.WS_WORKFLOW_STEPS,
-      TOPICS.WORKFLOW_STEP_RESULTS.name,
-      async ({ message }) => {
-        if (this.connectedClients > 0) {
-          const event = JSON.parse(message.value!.toString());
-          this.server.emit('workflow-step', event);
-        }
-      },
-    );
+    await subscribe(CONSUMER_GROUPS.WS_PING, TOPICS.PING_EVENTS.name, 'ping');
+    await subscribe(CONSUMER_GROUPS.WS_STATE, TOPICS.MONITOR_STATE.name, 'monitor-state');
+    await subscribe(CONSUMER_GROUPS.WS_INCIDENTS, TOPICS.INCIDENT_EVENTS.name, 'incident');
+    await subscribe(CONSUMER_GROUPS.WS_JOB_RESULTS, TOPICS.JOB_RESULTS.name, 'job-run');
+    await subscribe(CONSUMER_GROUPS.WS_JOB_LOGS, TOPICS.JOB_RUN_LOGS.name, 'job-log');
+    await subscribe(CONSUMER_GROUPS.WS_WORKFLOW_STEPS, TOPICS.WORKFLOW_STEP_RESULTS.name, 'workflow-step');
 
     this.logger.log('WebSocket gateway consumers started');
   }

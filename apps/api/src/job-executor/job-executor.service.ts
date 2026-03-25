@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
-import { eq, and, count, desc, isNotNull, lt } from 'drizzle-orm';
+import { eq, and, count, desc, isNotNull, lt, inArray } from 'drizzle-orm';
 import { RedpandaService } from '../redpanda/redpanda.service';
 import { TOPICS, CONSUMER_GROUPS } from '../redpanda/redpanda.constants';
 import { DRIZZLE, type Database } from '../database/database.provider';
@@ -12,6 +12,7 @@ import type {
   JobRunLogEvent,
   WorkflowResumeEvent,
 } from '../redpanda/redpanda.interfaces';
+import { validateOutboundUrl } from '../common/util/url-validator';
 
 @Injectable()
 export class JobExecutorService implements OnModuleInit {
@@ -27,7 +28,13 @@ export class JobExecutorService implements OnModuleInit {
       CONSUMER_GROUPS.JOB_EXECUTOR,
       TOPICS.JOB_TRIGGERS.name,
       async ({ message }) => {
-        const event: JobTriggerEvent = JSON.parse(message.value!.toString());
+        let event: JobTriggerEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.execute(event);
       },
     );
@@ -181,6 +188,7 @@ export class JobExecutorService implements OnModuleInit {
       const timeoutMs = (job.timeoutSeconds ?? 30) * 1000;
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+      await validateOutboundUrl(job.url);
       await this.emitLog(job.id, event.runId, 'debug', `Sending ${job.method ?? 'POST'} request to ${job.url}`);
 
       try {
@@ -385,45 +393,56 @@ export class JobExecutorService implements OnModuleInit {
       )
       .orderBy(jobRuns.queuedAt);
 
-    for (const run of queuedRuns) {
-      // Check if a slot is available for this job
-      const [job] = await this.db
-        .select()
-        .from(jobs)
-        .where(eq(jobs.id, run.jobId))
-        .limit(1);
+    if (queuedRuns.length === 0) return;
 
+    // Batch-fetch all relevant jobs
+    const jobIds = [...new Set(queuedRuns.map((r) => r.jobId))];
+    const jobRows = await this.db
+      .select()
+      .from(jobs)
+      .where(inArray(jobs.id, jobIds));
+    const jobMap = new Map(jobRows.map((j) => [j.id, j]));
+
+    // Batch-fetch running counts per job
+    const runningCounts = await this.db
+      .select({ jobId: jobRuns.jobId, runningCount: count() })
+      .from(jobRuns)
+      .where(
+        and(
+          inArray(jobRuns.jobId, jobIds),
+          eq(jobRuns.status, 'running'),
+        ),
+      )
+      .groupBy(jobRuns.jobId);
+    const runningMap = new Map(runningCounts.map((r) => [r.jobId, Number(r.runningCount)]));
+
+    for (const run of queuedRuns) {
+      const job = jobMap.get(run.jobId);
       if (!job) continue;
 
       const limit = job.concurrencyLimit ?? 1;
-      const [{ runningCount }] = await this.db
-        .select({ runningCount: count() })
-        .from(jobRuns)
-        .where(
-          and(
-            eq(jobRuns.jobId, job.id),
-            eq(jobRuns.status, 'running'),
-          ),
-        );
+      const running = runningMap.get(job.id) ?? 0;
 
-      if (Number(runningCount) >= limit) continue;
+      if (running >= limit) continue;
 
       // Slot available — dispatch this queued run
       const event: JobTriggerEvent = {
         jobId: run.jobId,
         runId: run.id,
-        trigger: run.trigger as any,
+        trigger: run.trigger as JobTriggerEvent['trigger'],
         scheduledAt: run.scheduledAt.toISOString(),
         timestamp: new Date().toISOString(),
       };
 
-      // Clear queuedAt so it's not picked up again by the sweep
       await this.db
         .update(jobRuns)
         .set({ queuedAt: null })
         .where(eq(jobRuns.id, run.id));
 
       await this.redpanda.publish(TOPICS.JOB_TRIGGERS.name, run.jobId, event);
+
+      // Update in-memory count so next queued run for same job sees correct state
+      runningMap.set(job.id, (runningMap.get(job.id) ?? 0) + 1);
 
       this.logger.log(`Dispatched queued run ${run.id} for job ${job.name}`);
     }

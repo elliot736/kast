@@ -24,7 +24,13 @@ export class JobLogSinkService implements OnModuleInit, OnModuleDestroy {
       CONSUMER_GROUPS.JOB_LOG_SINK,
       TOPICS.JOB_RUN_LOGS.name,
       async ({ message }) => {
-        const event: JobRunLogEvent = JSON.parse(message.value!.toString());
+        let event: JobRunLogEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         this.buffer.push(event);
         if (this.buffer.length >= JobLogSinkService.BATCH_SIZE) {
           await this.flush();

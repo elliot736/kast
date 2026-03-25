@@ -7,7 +7,6 @@ import {
   Body,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
-import { Public } from './auth.decorator';
 import { AuthService } from './auth.service';
 
 @ApiTags('api-keys')
@@ -16,7 +15,6 @@ export class AuthController {
   constructor(private authService: AuthService) {}
 
   @Post()
-  @Public()
   @ApiOperation({ summary: 'Create a new API key' })
   @ApiResponse({ status: 201, description: 'API key created' })
   async create(@Body('label') label?: string) {

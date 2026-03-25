@@ -96,8 +96,8 @@ export class JobController {
   ) {
     return this.jobService.getRuns(id, {
       status,
-      limit: limit ? parseInt(limit, 10) : undefined,
-      offset: offset ? parseInt(offset, 10) : undefined,
+      limit: Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100),
+      offset: Math.max(parseInt(offset ?? '0', 10) || 0, 0),
     });
   }
 
@@ -120,8 +120,8 @@ export class JobController {
   ) {
     return this.jobService.getRunLogs(runId, {
       level,
-      limit: limit ? parseInt(limit, 10) : undefined,
-      offset: offset ? parseInt(offset, 10) : undefined,
+      limit: Math.min(Math.max(parseInt(limit ?? '100', 10) || 100, 1), 500),
+      offset: Math.max(parseInt(offset ?? '0', 10) || 0, 0),
     });
   }
 

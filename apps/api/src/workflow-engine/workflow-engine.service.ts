@@ -27,6 +27,7 @@ import type {
   SignalChildStepConfig,
   WaitForSignalStepConfig,
 } from '../workflow/workflow.types';
+import { validateOutboundUrl } from '../common/util/url-validator';
 
 @Injectable()
 export class WorkflowEngineService implements OnModuleInit {
@@ -42,7 +43,13 @@ export class WorkflowEngineService implements OnModuleInit {
       CONSUMER_GROUPS.WORKFLOW_ENGINE,
       TOPICS.WORKFLOW_RESUME.name,
       async ({ message }) => {
-        const event: WorkflowResumeEvent = JSON.parse(message.value!.toString());
+        let event: WorkflowResumeEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.replay(event);
       },
     );
@@ -300,7 +307,7 @@ export class WorkflowEngineService implements OnModuleInit {
             const config = step.config as SignalParentStepConfig;
 
             // Find parent: look up jobRun.parentRunId → find parent's workflow run
-            const parentJobRunId = (jobRun as any).parentRunId;
+            const parentJobRunId = jobRun.parentRunId;
 
             if (!parentJobRunId) {
               await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'warn', 'No parent run to signal');
@@ -652,6 +659,8 @@ export class WorkflowEngineService implements OnModuleInit {
     const controller = new AbortController();
     const timeoutMs = (config.timeoutSeconds ?? 30) * 1000;
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    await validateOutboundUrl(config.url);
 
     try {
       const res = await fetch(config.url, {

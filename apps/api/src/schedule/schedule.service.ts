@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Interval } from '@nestjs/schedule';
-import { eq, and, lt, isNotNull, or, desc } from 'drizzle-orm';
+import { eq, and, lt, isNotNull, or, desc, inArray, sql } from 'drizzle-orm';
 import { CronExpressionParser } from 'cron-parser';
 import { RedpandaService } from '../redpanda/redpanda.service';
 import { TOPICS, CONSUMER_GROUPS } from '../redpanda/redpanda.constants';
@@ -27,7 +27,13 @@ export class ScheduleService implements OnModuleInit {
       CONSUMER_GROUPS.SCHEDULER,
       TOPICS.PING_EVENTS.name,
       async ({ message }) => {
-        const event: PingEvent = JSON.parse(message.value!.toString());
+        let event: PingEvent;
+        try {
+          event = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.handlePingEvent(event);
       },
     );
@@ -191,14 +197,20 @@ export class ScheduleService implements OnModuleInit {
         ),
       );
 
+    if (monitorsWithMaxRuntime.length === 0) return;
+
+    // Batch-fetch latest ping per monitor using DISTINCT ON
+    const monitorIds = monitorsWithMaxRuntime.map((m) => m.id);
+    const latestPings = await this.db
+      .selectDistinctOn([pings.monitorId])
+      .from(pings)
+      .where(inArray(pings.monitorId, monitorIds))
+      .orderBy(pings.monitorId, desc(pings.createdAt));
+
+    const pingMap = new Map(latestPings.map((p) => [p.monitorId, p]));
+
     for (const monitor of monitorsWithMaxRuntime) {
-      // Find the most recent ping
-      const [lastPing] = await this.db
-        .select()
-        .from(pings)
-        .where(eq(pings.monitorId, monitor.id))
-        .orderBy(desc(pings.createdAt))
-        .limit(1);
+      const lastPing = pingMap.get(monitor.id);
 
       // If the last ping is a 'start' with no subsequent success, check runtime
       if (lastPing && lastPing.type === 'start') {

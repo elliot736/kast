@@ -62,7 +62,13 @@ const db = drizzle(authPool, { schema });
 export const auth = betterAuth({
   database: drizzleAdapter(db, { provider: 'pg', schema }),
   baseURL: process.env.BETTER_AUTH_URL ?? 'http://localhost:3001',
-  secret: process.env.BETTER_AUTH_SECRET ?? 'kast-dev-secret-change-in-production-32chars',
+  secret: (() => {
+    const secret = process.env.BETTER_AUTH_SECRET ?? 'kast-dev-secret-change-in-production-32chars';
+    if (process.env.NODE_ENV === 'production' && secret === 'kast-dev-secret-change-in-production-32chars') {
+      throw new Error('BETTER_AUTH_SECRET must be set in production');
+    }
+    return secret;
+  })(),
   trustedOrigins: (process.env.TRUSTED_ORIGINS ?? 'http://localhost:3000,http://localhost:3002').split(','),
   emailAndPassword: {
     enabled: true,

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WorkflowEngineService } from './workflow-engine.service';
 
+vi.mock('../common/util/url-validator', () => ({
+  validateOutboundUrl: vi.fn().mockResolvedValue(undefined),
+}));
+
 // ---------------------------------------------------------------------------
 // Mock fetch globally
 // ---------------------------------------------------------------------------
@@ -647,173 +651,13 @@ describe('WorkflowEngineService', () => {
   // Wait for event step
   // -----------------------------------------------------------------------
 
-  describe('wait_for_event step', () => {
-    it('updates status to waiting with event name and stops processing', async () => {
-      const steps = [
-        {
-          id: 'wait_approval',
-          name: 'Wait for Approval',
-          type: 'wait_for_event',
-          config: {
-            eventName: 'approval.granted',
-            filter: { userId: 'user-123' },
-            timeoutDuration: 'PT5M',
-          },
-        },
-      ];
-
-      const mockDb = createMockDb({
-        selectResults: [
-          [makeWorkflowRun()],
-          [makeWorkflow(steps)],
-          [makeJobRun()],
-          [],
-        ],
-        updateResults: [[]],  // update workflow run to waiting
-      });
-
-      service = new WorkflowEngineService(mockRedpanda as any, mockDb as any);
-
-      await getReplay(service)(makeResumeEvent());
-
-      expect(mockFetch).not.toHaveBeenCalled();
-
-      const setCall = mockDb.update.mock.results[0].value.set.mock.calls[0][0];
-      expect(setCall.status).toBe('waiting');
-      expect(setCall.waitingForEvent).toBe('approval.granted');
-      expect(setCall.waitingForFilter).toEqual({ userId: 'user-123' });
-      expect(setCall.waitTimeoutAt).toBeInstanceOf(Date);
-    });
-
-    it('sets waitTimeoutAt to null when no timeoutDuration provided', async () => {
-      const steps = [
-        {
-          id: 'wait_forever',
-          name: 'Wait Indefinitely',
-          type: 'wait_for_event',
-          config: { eventName: 'some.event' },
-        },
-      ];
-
-      const mockDb = createMockDb({
-        selectResults: [
-          [makeWorkflowRun()],
-          [makeWorkflow(steps)],
-          [makeJobRun()],
-          [],
-        ],
-        updateResults: [[]],
-      });
-
-      service = new WorkflowEngineService(mockRedpanda as any, mockDb as any);
-
-      await getReplay(service)(makeResumeEvent());
-
-      const setCall = mockDb.update.mock.results[0].value.set.mock.calls[0][0];
-      expect(setCall.waitTimeoutAt).toBeNull();
-    });
-  });
+  // Note: wait_for_event and send_event tests removed — those step types
+  // were replaced by wait_for_signal, signal_parent, signal_child, and spawn.
 
   // -----------------------------------------------------------------------
   // Send event step
   // -----------------------------------------------------------------------
 
-  describe('send_event step', () => {
-    it('publishes to workflow-events topic, records result, and continues', async () => {
-      const steps = [
-        {
-          id: 'send_notify',
-          name: 'Notify',
-          type: 'send_event',
-          config: {
-            eventName: 'notification.sent',
-            payload: { message: 'Hello', count: 5 },
-          },
-        },
-      ];
-
-      const mockDb = createMockDb({
-        selectResults: [
-          [makeWorkflowRun()],
-          [makeWorkflow(steps)],
-          [makeJobRun()],
-          [],
-        ],
-        insertResults: [[]],  // step result
-        updateResults: [[], []],  // complete workflow + job run
-      });
-
-      service = new WorkflowEngineService(mockRedpanda as any, mockDb as any);
-
-      await getReplay(service)(makeResumeEvent());
-
-      // Verify event was published
-      expect(mockRedpanda.publish).toHaveBeenCalledWith(
-        'workflow-events',
-        'notification.sent',
-        expect.objectContaining({
-          name: 'notification.sent',
-          payload: { message: 'Hello', count: 5 },
-          source: 'wfrun-1',
-        }),
-      );
-
-      // Verify workflow completes
-      expect(mockRedpanda.publish).toHaveBeenCalledWith(
-        'job-results',
-        'job-1',
-        expect.objectContaining({ status: 'success' }),
-      );
-    });
-
-    it('interpolates template expressions in the payload', async () => {
-      const steps = [
-        {
-          id: 'fetch_user',
-          name: 'Fetch User',
-          type: 'run',
-          config: { url: 'https://api.com/user', method: 'GET' },
-        },
-        {
-          id: 'send_result',
-          name: 'Send Result',
-          type: 'send_event',
-          config: {
-            eventName: 'user.fetched',
-            payload: { name: '{{context.fetch_user.name}}', raw: 42 },
-          },
-        },
-      ];
-
-      // Step 0 already has result
-      const existingResults = [
-        { stepIndex: 0, status: 'completed', output: { name: 'Alice', age: 30 } },
-      ];
-
-      const mockDb = createMockDb({
-        selectResults: [
-          [makeWorkflowRun()],
-          [makeWorkflow(steps)],
-          [makeJobRun()],
-          existingResults,
-        ],
-        insertResults: [[]],
-        updateResults: [[], []],
-      });
-
-      service = new WorkflowEngineService(mockRedpanda as any, mockDb as any);
-
-      await getReplay(service)(makeResumeEvent());
-
-      expect(mockRedpanda.publish).toHaveBeenCalledWith(
-        'workflow-events',
-        'user.fetched',
-        expect.objectContaining({
-          payload: { name: 'Alice', raw: 42 },
-        }),
-      );
-    });
-  });
 
   // -----------------------------------------------------------------------
   // All steps complete
@@ -952,11 +796,11 @@ describe('WorkflowEngineService', () => {
   // Event payload injection into context
   // -----------------------------------------------------------------------
 
-  describe('event payload injection', () => {
-    it('injects event payload into context.__lastEvent on event_received resume', async () => {
+  describe('signal payload injection', () => {
+    it('injects signal payload into context.__lastSignal on signal_received resume', async () => {
       const steps = [
-        { id: 'wait_step', name: 'Wait', type: 'wait_for_event', config: { eventName: 'test' } },
-        { id: 'use_event', name: 'Use Event', type: 'run', config: { url: 'https://api.com', method: 'POST', body: '{{context.__lastEvent.data}}' } },
+        { id: 'wait_step', name: 'Wait', type: 'wait_for_signal', config: {} },
+        { id: 'use_event', name: 'Use Event', type: 'run', config: { url: 'https://api.com', method: 'POST', body: '{{context.__lastSignal.data}}' } },
       ];
 
       const existingResults = [
@@ -982,8 +826,8 @@ describe('WorkflowEngineService', () => {
       });
 
       await getReplay(service)(makeResumeEvent({
-        reason: 'event_received',
-        eventPayload: { data: 'payload-value' },
+        reason: 'signal_received',
+        signalPayload: { data: 'payload-value' },
       }));
 
       expect(mockFetch).toHaveBeenCalledTimes(1);

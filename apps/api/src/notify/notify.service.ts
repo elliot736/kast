@@ -37,7 +37,13 @@ export class NotifyService implements OnModuleInit {
       CONSUMER_GROUPS.NOTIFY,
       TOPICS.ALERT_TRIGGERS.name,
       async ({ message }) => {
-        const trigger: AlertTrigger = JSON.parse(message.value!.toString());
+        let trigger: AlertTrigger;
+        try {
+          trigger = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.handleTrigger(trigger);
       },
     );
@@ -47,7 +53,13 @@ export class NotifyService implements OnModuleInit {
       CONSUMER_GROUPS.NOTIFY + '-retries',
       TOPICS.ALERT_RETRIES.name,
       async ({ message }) => {
-        const payload = JSON.parse(message.value!.toString());
+        let payload: any;
+        try {
+          payload = JSON.parse(message.value!.toString());
+        } catch {
+          this.logger.warn('Skipping malformed Kafka message');
+          return;
+        }
         await this.handleRetry(payload);
       },
     );
@@ -269,7 +281,7 @@ export class NotifyService implements OnModuleInit {
     await this.db.insert(alertLog).values({
       incidentId: payload.trigger.incidentId,
       alertConfigId: payload.alertConfigId,
-      channel: payload.channel as any,
+      channel: payload.channel as typeof alertConfigs.$inferSelect['channel'],
       status: result.success ? 'sent' : 'retrying',
       attempts: payload.attempt + 1,
       lastError: result.error ?? null,
@@ -279,7 +291,12 @@ export class NotifyService implements OnModuleInit {
     if (!result.success) {
       await this.scheduleRetry(
         payload.trigger,
-        { id: payload.alertConfigId, channel: payload.channel, destination: payload.destination, config: payload.config } as any,
+        {
+          id: payload.alertConfigId,
+          channel: payload.channel,
+          destination: payload.destination,
+          config: payload.config,
+        } as unknown as typeof alertConfigs.$inferSelect,
         payload.attempt + 1,
       );
     }

@@ -138,21 +138,49 @@ export interface JobStats {
   status: string;
 }
 
+// ── Legacy step type (kept for backward compat) ─────────────
 export interface WorkflowStepDefinition {
   id: string;
   name: string;
-  type: "run" | "sleep" | "spawn" | "signal_parent" | "signal_child" | "wait_for_signal" | "fan_out";
+  type: "run" | "sleep" | "spawn" | "signal_parent" | "signal_child" | "wait_for_signal" | "fan_out" | "condition" | "loop";
   config: Record<string, unknown>;
   retryPolicy?: { maxAttempts: number; delaySeconds: number; backoffMultiplier: number };
   onFailure?: "abort" | "continue" | "goto";
   onFailureGoto?: string;
 }
 
+// ── Graph workflow model ─────────────────────────────────────
+export type NodeType = "run" | "sleep" | "condition" | "run_job" | "fan_out" | "webhook_wait";
+
+export interface WorkflowNodeDefinition {
+  id: string;
+  name: string;
+  type: NodeType;
+  config: Record<string, unknown>;
+  retryPolicy?: { maxAttempts: number; delaySeconds: number; backoffMultiplier: number };
+  onFailure?: "abort" | "continue";
+  position?: { x: number; y: number };
+}
+
+export interface WorkflowEdgeDefinition {
+  id: string;
+  source: string;
+  sourceHandle?: string;
+  target: string;
+  label?: string;
+  loop?: { maxIterations: number; untilExpression: string };
+}
+
+export interface WorkflowGraph {
+  nodes: WorkflowNodeDefinition[];
+  edges: WorkflowEdgeDefinition[];
+}
+
 export interface Workflow {
   id: string;
   jobId: string;
   version: number;
-  steps: WorkflowStepDefinition[];
+  steps: WorkflowGraph | WorkflowStepDefinition[];
   createdAt: string;
 }
 
@@ -162,6 +190,7 @@ export interface WorkflowRun {
   jobRunId: string;
   status: "running" | "sleeping" | "waiting" | "completed" | "failed" | "cancelled";
   currentStepIndex: number | null;
+  currentStepId: string | null;
   context: Record<string, unknown>;
   resumeAt: string | null;
   waitTimeoutAt: string | null;
@@ -169,7 +198,7 @@ export interface WorkflowRun {
   startedAt: string | null;
   finishedAt: string | null;
   createdAt: string;
-  steps: WorkflowStepDefinition[];
+  steps: WorkflowGraph | WorkflowStepDefinition[];
   stepResults: WorkflowStepResult[];
 }
 

@@ -61,10 +61,11 @@ export class WorkflowEventMatcherService implements OnModuleInit {
       );
 
     // Record wait step as completed
+    const stepId = targetRun.currentStepId ?? `__wait_${targetRun.currentStepIndex ?? 0}`;
     const stepIndex = targetRun.currentStepIndex ?? 0;
     await this.db.insert(workflowStepResults).values({
       workflowRunId: targetRun.id,
-      stepId: `__wait_${stepIndex}`,
+      stepId,
       stepIndex,
       status: 'completed',
       output: { signal: signal.payload, sourceRunId: signal.sourceRunId },

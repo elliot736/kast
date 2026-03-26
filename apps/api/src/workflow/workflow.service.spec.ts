@@ -124,7 +124,8 @@ describe('WorkflowService', () => {
         expect.objectContaining({
           jobId: 'job-1',
           version: 1,
-          steps: dto.steps,
+          // Legacy array auto-migrated to graph format
+          steps: expect.objectContaining({ nodes: expect.any(Array), edges: expect.any(Array) }),
         }),
       );
       expect(insertChain.returning).toHaveBeenCalled();
@@ -135,26 +136,26 @@ describe('WorkflowService', () => {
         id: 'wf-1',
         jobId: 'job-1',
         version: 2,
-        steps: [],
+        steps: { nodes: [], edges: [] },
         createdAt: new Date(),
       };
       const updated = {
         id: 'wf-2',
         jobId: 'job-1',
         version: 3,
-        steps: [{ id: 's1', name: 'New Step', type: 'run', config: { url: 'https://example.com', method: 'POST' } }],
+        steps: { nodes: [{ id: 's1' }], edges: [] },
         createdAt: new Date(),
       };
 
-      // First call (select for getByJobId) returns existing
       const selectChain = createChainMock([existing]);
       mockDb.select = vi.fn().mockReturnValue(selectChain);
 
       const insertChain = createChainMock([updated]);
       mockDb.insert = vi.fn().mockReturnValue(insertChain);
 
+      // Pass graph format directly
       const dto = {
-        steps: [{ id: 's1', name: 'New Step', type: 'run' as const, config: { url: 'https://example.com', method: 'POST' } }],
+        steps: { nodes: [{ id: 's1', name: 'New Step', type: 'run', config: { url: 'https://example.com', method: 'POST' } }], edges: [] },
       };
 
       const result = await service.upsert('job-1', dto);
@@ -190,7 +191,7 @@ describe('WorkflowService', () => {
 
   describe('getWorkflowRun', () => {
     it('returns a run with step results when found', async () => {
-      const workflow = { id: 'wf-1', jobId: 'job-1', version: 1, steps: [{ id: 's1', type: 'run' }] };
+      const workflow = { id: 'wf-1', jobId: 'job-1', version: 1, steps: { nodes: [{ id: 's1', name: 's1', type: 'start', config: {} }], edges: [] } };
       const wfRun = { id: 'run-1', workflowId: 'wf-1', jobRunId: 'jr-1', status: 'completed' };
       const stepResults = [
         { id: 'sr-1', workflowRunId: 'run-1', stepIndex: 0, status: 'completed', output: { data: 'ok' } },

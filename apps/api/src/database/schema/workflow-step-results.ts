@@ -28,6 +28,7 @@ export const workflowStepResults = pgTable(
     stepIndex: integer('step_index').notNull(),
     status: stepResultStatusEnum('status').notNull(),
 
+    iteration: integer('iteration').default(1),
     output: jsonb('output').$type<unknown>(),
     errorMessage: text('error_message'),
     durationMs: integer('duration_ms'),
@@ -38,5 +39,6 @@ export const workflowStepResults = pgTable(
   (table) => [
     index('wsr_run_idx').on(table.workflowRunId),
     index('wsr_run_step_idx').on(table.workflowRunId, table.stepIndex),
+    index('wsr_run_step_id_idx').on(table.workflowRunId, table.stepId),
   ],
 );

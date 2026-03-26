@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
-// --- Step configs (mirrors API workflow.dto.ts) ---
+// --- Node configs (mirrors API workflow.dto.ts) ---
 
-const runStepConfigSchema = z.object({
+const runNodeConfigSchema = z.object({
   url: z.string(),
   method: z.string(),
   headers: z.record(z.string()).optional(),
@@ -11,40 +11,26 @@ const runStepConfigSchema = z.object({
   successStatusCodes: z.array(z.number().int()).optional(),
 });
 
-const sleepStepConfigSchema = z.object({
+const sleepNodeConfigSchema = z.object({
   duration: z.string().min(1),
 });
 
-const spawnStepConfigSchema = z.object({
+const conditionNodeConfigSchema = z.object({
+  expression: z.string().min(1),
+});
+
+const runJobNodeConfigSchema = z.object({
   targetJob: z.string().min(1), // slug — resolved to UUID at apply time
-  waitForCompletion: z.boolean(),
+  mode: z.enum(['wait', 'fire_and_forget']),
   input: z.record(z.unknown()).optional(),
 });
 
-const signalParentStepConfigSchema = z.object({
-  payload: z.record(z.unknown()).optional(),
-});
-
-const signalChildStepConfigSchema = z.object({
-  spawnStepId: z.string().min(1),
-  payload: z.record(z.unknown()).optional(),
-});
-
-const waitForSignalStepConfigSchema = z.object({
-  timeoutDuration: z.string().optional(),
-});
-
-const fanOutBranchSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  config: runStepConfigSchema,
-});
-
-const fanOutStepConfigSchema = z.object({
-  branches: z.array(fanOutBranchSchema).min(1).max(50),
+const fanOutNodeConfigSchema = z.object({
   concurrency: z.number().int().positive().optional(),
   failFast: z.boolean().optional(),
 });
+
+const emptyConfigSchema = z.object({}).passthrough();
 
 const retryPolicySchema = z.object({
   maxAttempts: z.number().int().positive(),
@@ -52,26 +38,40 @@ const retryPolicySchema = z.object({
   backoffMultiplier: z.number().positive(),
 });
 
-const stepSchema = z.object({
+// --- Graph workflow schema ---
+
+const nodeSchema = z.object({
   id: z.string().min(1).max(255),
-  name: z.string().min(1).max(255),
-  type: z.enum(['run', 'sleep', 'spawn', 'signal_parent', 'signal_child', 'wait_for_signal', 'fan_out']),
+  name: z.string().max(255).optional(),
+  type: z.enum(['run', 'sleep', 'condition', 'run_job', 'fan_out', 'webhook_wait']),
   config: z.union([
-    runStepConfigSchema.passthrough(),
-    sleepStepConfigSchema.passthrough(),
-    spawnStepConfigSchema.passthrough(),
-    signalParentStepConfigSchema.passthrough(),
-    signalChildStepConfigSchema.passthrough(),
-    waitForSignalStepConfigSchema.passthrough(),
-    fanOutStepConfigSchema.passthrough(),
-  ]),
+    runNodeConfigSchema.passthrough(),
+    sleepNodeConfigSchema.passthrough(),
+    conditionNodeConfigSchema.passthrough(),
+    runJobNodeConfigSchema.passthrough(),
+    fanOutNodeConfigSchema.passthrough(),
+    emptyConfigSchema,
+  ]).default({}),
   retryPolicy: retryPolicySchema.optional(),
-  onFailure: z.enum(['abort', 'continue', 'goto']).optional(),
-  onFailureGoto: z.string().optional(),
+  onFailure: z.enum(['abort', 'continue']).optional(),
+});
+
+const loopEdgeConfigSchema = z.object({
+  maxIterations: z.number().int().min(1).max(100),
+  untilExpression: z.string().min(1),
+});
+
+const edgeSchema = z.object({
+  source: z.string().min(1),
+  sourceHandle: z.string().optional(),
+  target: z.string().min(1),
+  label: z.string().optional(),
+  loop: loopEdgeConfigSchema.optional(),
 });
 
 const workflowSchema = z.object({
-  steps: z.array(stepSchema).min(1).max(50),
+  nodes: z.array(nodeSchema).min(1).max(100),
+  edges: z.array(edgeSchema).max(200),
 });
 
 // --- Alert config ---
@@ -156,4 +156,5 @@ export type JobDef = z.infer<typeof jobSchema>;
 export type TeamDef = z.infer<typeof teamSchema>;
 export type AlertDef = z.infer<typeof alertSchema>;
 export type WorkflowDef = z.infer<typeof workflowSchema>;
-export type StepDef = z.infer<typeof stepSchema>;
+export type NodeDef = z.infer<typeof nodeSchema>;
+export type EdgeDef = z.infer<typeof edgeSchema>;

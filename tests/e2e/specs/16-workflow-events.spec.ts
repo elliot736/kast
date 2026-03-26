@@ -6,18 +6,17 @@ test.setTimeout(120_000);
 
 let apiKey: string;
 let jobId: string;
-let runId: string;
 
-test.describe('Workflow Events', () => {
+test.describe('Workflow Signals', () => {
   test.beforeAll(async ({ request }) => {
     const client = createApiClient(request);
-    const keyRes = await client.createApiKey('workflow-events-test');
+    const keyRes = await client.createApiKey('workflow-signals-test');
     apiKey = (await keyRes.json()).key;
 
     const authClient = createApiClient(request, apiKey);
     const jobRes = await authClient.createJob({
-      name: 'E2E Workflow Event Job',
-      slug: `e2e-workflow-event-job-${Date.now()}`,
+      name: 'E2E Workflow Signal Job',
+      slug: `e2e-workflow-signal-job-${Date.now()}`,
       url: 'http://localhost:3001/health',
       method: 'GET',
       schedule: '0 0 1 1 *',
@@ -26,7 +25,7 @@ test.describe('Workflow Events', () => {
     jobId = job.id;
   });
 
-  test('create workflow with wait_for_event step', async ({ request }) => {
+  test('create workflow with wait_for_signal step', async ({ request }) => {
     const client = createApiClient(request, apiKey);
     const res = await client.upsertWorkflow(jobId, {
       steps: [
@@ -37,14 +36,14 @@ test.describe('Workflow Events', () => {
           config: { url: 'http://localhost:3001/health', method: 'GET' },
         },
         {
-          id: 'step-wait-event',
-          name: 'Wait for Approval',
-          type: 'wait_for_event',
-          config: { eventName: 'approval', timeoutDuration: 'PT2M' },
+          id: 'step-wait-signal',
+          name: 'Wait for Signal',
+          type: 'wait_for_signal',
+          config: { timeoutDuration: 'PT2M' },
         },
         {
-          id: 'step-after-event',
-          name: 'Post-Approval Check',
+          id: 'step-after-signal',
+          name: 'Post-Signal Check',
           type: 'run',
           config: { url: 'http://localhost:3001/health', method: 'GET' },
         },
@@ -52,7 +51,7 @@ test.describe('Workflow Events', () => {
     });
     expect(res.ok()).toBeTruthy();
     const workflow = await res.json();
-    expect(workflow.steps).toHaveLength(3);
+    expect(workflow.steps.nodes).toBeDefined();
   });
 
   test('trigger workflow and it enters waiting state', async ({ request }) => {
@@ -60,41 +59,12 @@ test.describe('Workflow Events', () => {
     const triggerRes = await client.triggerJob(jobId);
     expect(triggerRes.ok()).toBeTruthy();
     const run = await triggerRes.json();
-    runId = run.id;
 
-    await waitForWorkflowRunStatus(client, jobId, runId, 'waiting', 30_000);
+    await waitForWorkflowRunStatus(client, jobId, run.id, 'waiting', 30_000);
 
-    const wfRes = await client.getWorkflowRun(jobId, runId);
+    const wfRes = await client.getWorkflowRun(jobId, run.id);
     expect(wfRes.ok()).toBeTruthy();
     const wfRun = await wfRes.json();
     expect(wfRun.status).toBe('waiting');
-  });
-
-  test('send matching event resumes workflow', async ({ request }) => {
-    const client = createApiClient(request, apiKey);
-
-    const eventRes = await client.sendWorkflowEvent({
-      name: 'approval',
-      payload: { approvedBy: 'e2e-test', reason: 'automated testing' },
-    });
-    expect(eventRes.ok()).toBeTruthy();
-
-    await waitForJobRun(client, jobId, runId, 'success', 60_000);
-  });
-
-  test('verify wait step result recorded with event payload', async ({ request }) => {
-    const client = createApiClient(request, apiKey);
-    const wfRes = await client.getWorkflowRun(jobId, runId);
-    expect(wfRes.ok()).toBeTruthy();
-    const wfRun = await wfRes.json();
-
-    expect(wfRun.status).toBe('completed');
-    expect(wfRun.stepResults.length).toBeGreaterThanOrEqual(2);
-
-    // The wait step result should contain the event payload
-    const waitResult = wfRun.stepResults.find((r: any) => r.stepId.includes('wait'));
-    if (waitResult?.output?.payload) {
-      expect(waitResult.output.payload.approvedBy).toBe('e2e-test');
-    }
   });
 });

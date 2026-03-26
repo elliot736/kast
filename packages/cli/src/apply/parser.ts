@@ -64,29 +64,25 @@ function validateCrossRefs(config: KastConfig) {
       errors.push(`jobs.${slug}.monitor: monitor "${job.monitor}" not defined in this file (will check remote)`);
     }
 
-    // Workflow spawn step refs
+    // Workflow node/edge refs
     if (job.workflow) {
-      for (const step of job.workflow.steps) {
-        if (step.type === 'spawn') {
-          const targetJob = (step.config as { targetJob?: string }).targetJob;
+      const nodeIds = new Set(job.workflow.nodes.map((n: any) => n.id));
+
+      for (const node of job.workflow.nodes) {
+        if (node.type === 'run_job') {
+          const targetJob = (node.config as { targetJob?: string }).targetJob;
           if (targetJob && !jobSlugs.has(targetJob)) {
-            errors.push(`jobs.${slug}.workflow.steps.${step.id}: targetJob "${targetJob}" not defined in this file (will check remote)`);
+            errors.push(`jobs.${slug}.workflow.nodes.${node.id}: targetJob "${targetJob}" not defined in this file (will check remote)`);
           }
         }
-        // signal_child must reference a spawn step id within the same workflow
-        if (step.type === 'signal_child') {
-          const spawnStepId = (step.config as { spawnStepId?: string }).spawnStepId;
-          const stepIds = job.workflow.steps.map((s) => s.id);
-          if (spawnStepId && !stepIds.includes(spawnStepId)) {
-            errors.push(`jobs.${slug}.workflow.steps.${step.id}: spawnStepId "${spawnStepId}" not found in workflow steps`);
-          }
+      }
+
+      for (const edge of job.workflow.edges) {
+        if (!nodeIds.has(edge.source)) {
+          errors.push(`jobs.${slug}.workflow.edges: source "${edge.source}" not found in nodes`);
         }
-        // onFailureGoto must reference a step id within the same workflow
-        if (step.onFailure === 'goto' && step.onFailureGoto) {
-          const stepIds = job.workflow.steps.map((s) => s.id);
-          if (!stepIds.includes(step.onFailureGoto)) {
-            errors.push(`jobs.${slug}.workflow.steps.${step.id}: onFailureGoto "${step.onFailureGoto}" not found in workflow steps`);
-          }
+        if (!nodeIds.has(edge.target)) {
+          errors.push(`jobs.${slug}.workflow.edges: target "${edge.target}" not found in nodes`);
         }
       }
     }

@@ -11,73 +11,67 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { WorkflowStepDefinition } from "@/lib/api";
-import { Plus, Trash2, X } from "lucide-react";
-
-// ── Constants ───────────────────────────────────────────────
+import type { WorkflowNodeDefinition } from "@/lib/api";
+import { Trash2, X } from "lucide-react";
 
 const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
 const FAILURE_OPTIONS = [
   { value: "abort", label: "Abort workflow" },
   { value: "continue", label: "Skip and continue" },
-  { value: "goto", label: "Go to step..." },
 ] as const;
 
-// ── Panel ───────────────────────────────────────────────────
-
 export function StepConfigPanel({
-  step,
+  node,
   onChange,
   onDelete,
   onClose,
 }: {
-  step: WorkflowStepDefinition;
-  onChange: (updated: WorkflowStepDefinition) => void;
+  node: WorkflowNodeDefinition;
+  onChange: (updated: WorkflowNodeDefinition) => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
-  const config = step.config as Record<string, any>;
+  const config = node.config as Record<string, any>;
 
   const updateConfig = (patch: Record<string, unknown>) => {
-    onChange({ ...step, config: { ...step.config, ...patch } });
+    onChange({ ...node, config: { ...node.config, ...patch } });
   };
 
   return (
     <div className="fixed top-0 right-0 z-50 h-full w-[350px] border-l bg-card flex flex-col shadow-xl">
       {/* Header */}
       <div className="flex items-center justify-between border-b px-4 py-3">
-        <h3 className="text-sm font-semibold">Configure Step</h3>
+        <h3 className="text-sm font-semibold">Configure Node</h3>
         <Button variant="ghost" size="icon-xs" onClick={onClose}>
           <X className="size-4" />
         </Button>
       </div>
 
-      {/* Content */}
       <ScrollArea className="flex-1">
         <div className="space-y-4 p-4">
-          {/* Step name */}
+          {/* Node name */}
           <div className="space-y-1.5">
-            <Label className="text-xs">Step Name</Label>
+            <Label className="text-xs">Name</Label>
             <Input
-              value={step.name}
-              onChange={(e) => onChange({ ...step, name: e.target.value })}
-              placeholder="Step name"
+              value={node.name}
+              onChange={(e) => onChange({ ...node, name: e.target.value })}
+              placeholder="Node name"
             />
           </div>
 
-          {/* Step ID (read-only) */}
+          {/* Node ID (read-only) */}
           <div className="space-y-1.5">
-            <Label className="text-xs text-muted-foreground">Step ID</Label>
+            <Label className="text-xs text-muted-foreground">Node ID</Label>
             <Input
-              value={step.id}
+              value={node.id}
               readOnly
               className="font-mono text-xs text-muted-foreground"
             />
           </div>
 
           {/* Type-specific config */}
-          {step.type === "run" && (
+          {node.type === "run" && (
             <>
               <div className="space-y-1.5">
                 <Label className="text-xs">HTTP Method</Label>
@@ -90,9 +84,7 @@ export function StepConfigPanel({
                   </SelectTrigger>
                   <SelectContent>
                     {HTTP_METHODS.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
+                      <SelectItem key={m} value={m}>{m}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -111,13 +103,7 @@ export function StepConfigPanel({
                 <Input
                   type="number"
                   value={config.timeoutSeconds ?? ""}
-                  onChange={(e) =>
-                    updateConfig({
-                      timeoutSeconds: e.target.value
-                        ? parseInt(e.target.value)
-                        : undefined,
-                    })
-                  }
+                  onChange={(e) => updateConfig({ timeoutSeconds: e.target.value ? parseInt(e.target.value) : undefined })}
                   placeholder="30"
                   min={1}
                 />
@@ -125,7 +111,7 @@ export function StepConfigPanel({
             </>
           )}
 
-          {step.type === "sleep" && (
+          {node.type === "sleep" && (
             <div className="space-y-1.5">
               <Label className="text-xs">Duration (ISO 8601)</Label>
               <Input
@@ -137,266 +123,115 @@ export function StepConfigPanel({
             </div>
           )}
 
-          {step.type === "spawn" && (
+          {node.type === "condition" && (
+            <div className="space-y-1.5">
+              <Label className="text-xs">Expression</Label>
+              <textarea
+                value={config.expression ?? ""}
+                onChange={(e) => updateConfig({ expression: e.target.value })}
+                placeholder='steps.fetch.status == 200'
+                rows={3}
+                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono transition-colors placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30"
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Drag from the green (true) or red (false) handle to connect branches.
+              </p>
+            </div>
+          )}
+
+          {node.type === "run_job" && (
             <>
               <div className="space-y-1.5">
                 <Label className="text-xs">Target Job ID</Label>
                 <Input
                   value={config.targetJobId ?? ""}
-                  onChange={(e) =>
-                    updateConfig({ targetJobId: e.target.value })
-                  }
+                  onChange={(e) => updateConfig({ targetJobId: e.target.value })}
                   placeholder="job-uuid"
                   className="font-mono text-xs"
                 />
               </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Mode</Label>
+                <Select
+                  value={config.mode ?? "fire_and_forget"}
+                  onValueChange={(val) => updateConfig({ mode: val })}
+                >
+                  <SelectTrigger className="text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="wait">Wait for completion</SelectItem>
+                    <SelectItem value="fire_and_forget">Fire and forget</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
+
+          {node.type === "fan_out" && (
+            <div className="space-y-1.5">
+              <Label className="text-xs">Concurrency</Label>
+              <Input
+                type="number"
+                value={config.concurrency ?? ""}
+                onChange={(e) => updateConfig({ concurrency: e.target.value ? parseInt(e.target.value) : undefined })}
+                placeholder="All"
+                min={1}
+              />
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
-                  checked={config.wait ?? false}
-                  onChange={(e) => updateConfig({ wait: e.target.checked })}
+                  checked={config.failFast ?? false}
+                  onChange={(e) => updateConfig({ failFast: e.target.checked })}
                   className="size-3.5 rounded accent-primary"
                 />
-                Wait for child to complete
+                Fail fast
               </label>
-            </>
-          )}
-
-          {step.type === "signal_parent" && (
-            <div className="space-y-1.5">
-              <Label className="text-xs">Payload (JSON)</Label>
-              <textarea
-                value={
-                  typeof config.payload === "string"
-                    ? config.payload
-                    : JSON.stringify(config.payload ?? {}, null, 2)
-                }
-                onChange={(e) => {
-                  try {
-                    updateConfig({ payload: JSON.parse(e.target.value) });
-                  } catch {
-                    // Store as raw string while user types
-                    updateConfig({ payload: e.target.value });
-                  }
-                }}
-                placeholder='{"key": "value"}'
-                rows={4}
-                className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono transition-colors placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30"
-              />
             </div>
           )}
 
-          {step.type === "signal_child" && (
-            <>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Spawn Step ID</Label>
-                <Input
-                  value={config.spawnStepId ?? ""}
-                  onChange={(e) =>
-                    updateConfig({ spawnStepId: e.target.value })
-                  }
-                  placeholder="step-id of spawn step"
-                  className="font-mono text-xs"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Payload (JSON)</Label>
-                <textarea
-                  value={
-                    typeof config.payload === "string"
-                      ? config.payload
-                      : JSON.stringify(config.payload ?? {}, null, 2)
-                  }
-                  onChange={(e) => {
-                    try {
-                      updateConfig({ payload: JSON.parse(e.target.value) });
-                    } catch {
-                      updateConfig({ payload: e.target.value });
-                    }
-                  }}
-                  placeholder='{"key": "value"}'
-                  rows={4}
-                  className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-xs font-mono transition-colors placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/30"
-                />
-              </div>
-            </>
-          )}
-
-          {step.type === "wait_for_signal" && (
+          {node.type === "webhook_wait" && (
             <div className="space-y-1.5">
-              <Label className="text-xs">Timeout Duration (ISO 8601)</Label>
+              <Label className="text-xs">Timeout (ISO 8601, optional)</Label>
               <Input
                 value={config.timeoutDuration ?? ""}
-                onChange={(e) =>
-                  updateConfig({ timeoutDuration: e.target.value })
-                }
-                placeholder="PT1H (optional)"
+                onChange={(e) => updateConfig({ timeoutDuration: e.target.value || undefined })}
+                placeholder="PT5M (leave empty for no timeout)"
                 className="font-mono text-xs"
               />
+              <p className="text-[10px] text-muted-foreground">
+                Workflow pauses until an external POST is received. The webhook URL is shown in the run detail.
+              </p>
             </div>
           )}
 
-          {step.type === "fan_out" && (
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Concurrency</Label>
-                  <Input
-                    type="number"
-                    value={config.concurrency ?? ""}
-                    onChange={(e) =>
-                      updateConfig({
-                        concurrency: e.target.value
-                          ? parseInt(e.target.value)
-                          : undefined,
-                      })
-                    }
-                    placeholder="All"
-                    min={1}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">&nbsp;</Label>
-                  <label className="flex items-center gap-2 text-sm h-8">
-                    <input
-                      type="checkbox"
-                      checked={config.failFast ?? false}
-                      onChange={(e) =>
-                        updateConfig({ failFast: e.target.checked })
-                      }
-                      className="size-3.5 rounded accent-primary"
-                    />
-                    Fail fast
-                  </label>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label className="text-xs">Branches</Label>
-                {((config.branches as any[]) ?? []).map(
-                  (branch: any, bi: number) => (
-                    <div
-                      key={bi}
-                      className="flex items-center gap-1.5 rounded border border-border bg-muted/30 p-1.5"
-                    >
-                      <Input
-                        value={branch.name ?? ""}
-                        onChange={(e) => {
-                          const branches = [
-                            ...((config.branches as any[]) ?? []),
-                          ];
-                          branches[bi] = {
-                            ...branches[bi],
-                            name: e.target.value,
-                          };
-                          updateConfig({ branches });
-                        }}
-                        placeholder="Name"
-                        className="h-7 text-xs w-20"
-                      />
-                      <Input
-                        value={branch.config?.url ?? ""}
-                        onChange={(e) => {
-                          const branches = [
-                            ...((config.branches as any[]) ?? []),
-                          ];
-                          branches[bi] = {
-                            ...branches[bi],
-                            config: {
-                              ...(branches[bi].config ?? {}),
-                              url: e.target.value,
-                            },
-                          };
-                          updateConfig({ branches });
-                        }}
-                        placeholder="https://..."
-                        className="flex-1 h-7 text-xs font-mono"
-                      />
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={() => {
-                          const branches = (
-                            (config.branches as any[]) ?? []
-                          ).filter((_: any, j: number) => j !== bi);
-                          updateConfig({ branches });
-                        }}
-                      >
-                        <Trash2 className="size-3 text-muted-foreground" />
-                      </Button>
-                    </div>
-                  )
-                )}
-                <Button
-                  variant="outline"
-                  size="xs"
-                  type="button"
-                  onClick={() => {
-                    const branches = [
-                      ...((config.branches as any[]) ?? []),
-                    ];
-                    branches.push({
-                      id: `branch-${branches.length + 1}`,
-                      name: `Branch ${branches.length + 1}`,
-                      config: { url: "", method: "POST" },
-                    });
-                    updateConfig({ branches });
-                  }}
-                >
-                  <Plus className="size-3" />
-                  Add Branch
-                </Button>
-              </div>
+          {/* Failure policy (not for condition) */}
+          {node.type !== "condition" && (
+            <div className="space-y-1.5 pt-2 border-t">
+              <Label className="text-xs">On Failure</Label>
+              <Select
+                value={node.onFailure ?? "abort"}
+                onValueChange={(val) => onChange({ ...node, onFailure: val as "abort" | "continue" })}
+              >
+                <SelectTrigger className="text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {FAILURE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           )}
-
-          {/* Failure policy */}
-          <div className="space-y-1.5 pt-2 border-t">
-            <Label className="text-xs">On Failure</Label>
-            <Select
-              value={step.onFailure ?? "abort"}
-              onValueChange={(val) =>
-                onChange({
-                  ...step,
-                  onFailure: val as WorkflowStepDefinition["onFailure"],
-                })
-              }
-            >
-              <SelectTrigger className="text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {FAILURE_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {step.onFailure === "goto" && (
-              <Input
-                value={step.onFailureGoto ?? ""}
-                onChange={(e) =>
-                  onChange({ ...step, onFailureGoto: e.target.value })
-                }
-                placeholder="Target step ID"
-                className="font-mono text-xs"
-              />
-            )}
-          </div>
         </div>
       </ScrollArea>
 
       {/* Footer */}
       <div className="border-t p-4">
-        <Button
-          variant="destructive"
-          size="sm"
-          className="w-full"
-          onClick={onDelete}
-        >
+        <Button variant="destructive" size="sm" className="w-full" onClick={onDelete}>
           <Trash2 className="size-3.5" />
-          Delete Step
+          Delete Node
         </Button>
       </div>
     </div>

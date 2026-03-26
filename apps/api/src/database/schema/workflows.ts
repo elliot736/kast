@@ -7,7 +7,7 @@ import {
   index,
 } from 'drizzle-orm/pg-core';
 import { jobs } from './jobs';
-import type { WorkflowStepDefinition } from '../../workflow/workflow.types';
+import type { WorkflowGraph, WorkflowStepDefinition } from '../../workflow/workflow.types';
 
 export const workflows = pgTable(
   'workflows',
@@ -17,7 +17,7 @@ export const workflows = pgTable(
       .references(() => jobs.id, { onDelete: 'cascade' })
       .notNull(),
     version: integer('version').default(1).notNull(),
-    steps: jsonb('steps').$type<WorkflowStepDefinition[]>().notNull(),
+    steps: jsonb('steps').$type<WorkflowGraph | WorkflowStepDefinition[]>().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [

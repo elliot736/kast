@@ -39,8 +39,9 @@ export class WorkflowController {
   @ApiResponse({ status: 200, description: 'Workflow created/updated' })
   async upsertWorkflow(
     @Param('id') jobId: string,
-    @Body(new ZodValidationPipe(createWorkflowSchema)) body: any,
+    @Body() body: any,
   ) {
+    // Accept both graph format { steps: { nodes, edges } } and legacy { steps: [] }
     return this.workflowService.upsert(jobId, body);
   }
 

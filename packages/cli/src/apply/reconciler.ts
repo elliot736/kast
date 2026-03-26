@@ -214,28 +214,36 @@ export async function reconcile(config: KastConfig): Promise<ReconcilePlan> {
     const existingJob = remote.jobMap.get(slug);
     const jobId = existingJob?.id;
 
-    // Transform spawn steps: targetJob slug -> targetJobId UUID
-    const steps = job.workflow.steps.map((step) => {
-      if (step.type === 'spawn') {
-        const config = step.config as { targetJob: string; waitForCompletion: boolean; input?: Record<string, unknown> };
-        const targetJob = remote.jobMap.get(config.targetJob);
+    // Transform run_job nodes: targetJob slug -> targetJobId UUID
+    const nodes = job.workflow.nodes.map((node) => {
+      if (node.type === 'run_job') {
+        const cfg = node.config as { targetJob: string; mode: string; input?: Record<string, unknown> };
+        const targetJob = remote.jobMap.get(cfg.targetJob);
         return {
-          ...step,
+          ...node,
+          name: node.name ?? node.id,
           config: {
-            targetJobId: targetJob?.id ?? `__slug:${config.targetJob}__`, // placeholder, resolved in executor
-            waitForCompletion: config.waitForCompletion,
-            ...(config.input && { input: config.input }),
+            targetJobId: targetJob?.id ?? `__slug:${cfg.targetJob}__`,
+            mode: cfg.mode,
+            ...(cfg.input && { input: cfg.input }),
           },
         };
       }
-      return step;
+      return { ...node, name: node.name ?? node.id };
     });
 
-    const payload = { steps };
+    // Auto-generate edge IDs if not present
+    const edges = job.workflow.edges.map((edge, i) => ({
+      id: `e-${edge.source}-${edge.sourceHandle ?? 'default'}-${edge.target}`,
+      ...edge,
+    }));
+
+    const payload = { steps: { nodes, edges } };
 
     // Compare with remote workflow
     const remoteWorkflow = remote.workflowMap.get(slug) as { steps?: unknown } | undefined;
-    if (remoteWorkflow && deepEqual(remoteWorkflow.steps, steps)) {
+    const remoteSteps = remoteWorkflow?.steps;
+    if (remoteSteps && deepEqual(remoteSteps, payload.steps)) {
       actions.push({ action: 'unchanged', resourceType: 'workflow', slug, parentId: jobId });
     } else {
       actions.push({
@@ -244,7 +252,7 @@ export async function reconcile(config: KastConfig): Promise<ReconcilePlan> {
         slug,
         payload,
         parentId: jobId,
-        changes: ['steps'],
+        changes: ['workflow'],
       });
     }
   }

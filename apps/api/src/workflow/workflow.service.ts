@@ -2,7 +2,7 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { eq, and, desc } from 'drizzle-orm';
 import { DRIZZLE, type Database } from '../database/database.provider';
 import { workflows, workflowRuns, workflowStepResults } from '../database/schema';
-import type { CreateWorkflowDto } from './workflow.dto';
+import { isGraphFormat, migrateLinearToGraph } from '../workflow-engine/graph-utils';
 
 @Injectable()
 export class WorkflowService {
@@ -18,16 +18,23 @@ export class WorkflowService {
     return workflow ?? null;
   }
 
-  async upsert(jobId: string, dto: CreateWorkflowDto) {
+  async upsert(jobId: string, dto: { steps: any }) {
     const existing = await this.getByJobId(jobId);
     const nextVersion = existing ? existing.version + 1 : 1;
+
+    // Accept both graph { nodes, edges } and legacy array format
+    let stepsData = dto.steps;
+    if (Array.isArray(stepsData)) {
+      // Legacy format — auto-migrate to graph
+      stepsData = migrateLinearToGraph(stepsData);
+    }
 
     const [workflow] = await this.db
       .insert(workflows)
       .values({
         jobId,
         version: nextVersion,
-        steps: dto.steps,
+        steps: stepsData,
       })
       .returning();
 
@@ -35,7 +42,6 @@ export class WorkflowService {
   }
 
   async getWorkflowRun(jobId: string, runId: string) {
-    // First find the workflow for this job
     const workflow = await this.getByJobId(jobId);
     if (!workflow) throw new NotFoundException('Workflow not found for this job');
 
@@ -56,11 +62,16 @@ export class WorkflowService {
       .select()
       .from(workflowStepResults)
       .where(eq(workflowStepResults.workflowRunId, wfRun.id))
-      .orderBy(workflowStepResults.stepIndex);
+      .orderBy(workflowStepResults.finishedAt);
+
+    // Ensure graph format in response
+    const steps = isGraphFormat(workflow.steps)
+      ? workflow.steps
+      : migrateLinearToGraph(workflow.steps as any[]);
 
     return {
       ...wfRun,
-      steps: workflow.steps,
+      steps,
       stepResults,
     };
   }

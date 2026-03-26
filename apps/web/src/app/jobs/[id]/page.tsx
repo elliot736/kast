@@ -248,6 +248,7 @@ export default function JobDetailPage() {
             jobRunId: "",
             status: "running" as const,
             currentStepIndex: event.stepIndex + 1,
+            currentStepId: event.stepId,
             context: {},
             resumeAt: null,
             waitTimeoutAt: null,
@@ -978,19 +979,23 @@ export default function JobDetailPage() {
         </CardHeader>
         <CardContent>
           <WorkflowCanvas
-            steps={workflow?.steps ?? []}
+            graph={
+              workflow?.steps && "nodes" in workflow.steps
+                ? workflow.steps
+                : { nodes: [], edges: [] }
+            }
             saving={savingWorkflow}
             execution={activeWfRun ? {
               stepResults: activeWfRun.stepResults,
-              currentStepIndex: activeWfRun.currentStepIndex,
+              currentStepId: (activeWfRun as any).currentStepId ?? null,
               workflowStatus: activeWfRun.status,
             } : undefined}
-            onSave={async (steps) => {
+            onSave={async (graph) => {
               setSavingWorkflow(true);
               try {
                 const updated = await api<Workflow>(`/api/v1/jobs/${id}/workflow`, {
                   method: "PUT",
-                  body: JSON.stringify({ steps }),
+                  body: JSON.stringify({ steps: graph }),
                 });
                 setWorkflow(updated);
                 toast.success(`Workflow saved (v${updated.version})`);

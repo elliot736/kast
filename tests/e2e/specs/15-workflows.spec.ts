@@ -47,17 +47,21 @@ test.describe('Workflows', () => {
     });
     expect(res.ok()).toBeTruthy();
     const workflow = await res.json();
-    expect(workflow.steps).toHaveLength(2);
+    // Legacy arrays are auto-migrated to graph format
+    expect(workflow.steps.nodes).toBeDefined();
+    expect(workflow.steps.edges).toBeDefined();
+    // 2 original steps + start + end = 4 nodes
+    expect(workflow.steps.nodes.length).toBe(4);
     expect(workflow.version).toBeTruthy();
   });
 
-  test('get workflow returns steps with version', async ({ request }) => {
+  test('get workflow returns graph with version', async ({ request }) => {
     const client = createApiClient(request, apiKey);
     const res = await client.getWorkflow(jobId);
     expect(res.ok()).toBeTruthy();
     const workflow = await res.json();
-    expect(Array.isArray(workflow.steps)).toBeTruthy();
-    expect(workflow.steps.length).toBe(2);
+    expect(workflow.steps.nodes).toBeDefined();
+    expect(workflow.steps.nodes.length).toBe(4);
     expect(workflow.version).toBeTruthy();
   });
 

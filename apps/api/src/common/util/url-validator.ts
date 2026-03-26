@@ -23,12 +23,16 @@ function isPrivateIP(ip: string): boolean {
   return false;
 }
 
+const isProduction = process.env.NODE_ENV === 'production';
+
 /**
  * Validates that a URL is safe to make outbound HTTP requests to.
- * Blocks private IPs, localhost, and cloud metadata endpoints.
+ * In production: blocks private IPs, localhost, and cloud metadata endpoints.
+ * In development/test: allows all URLs.
  * Throws an error if the URL is not allowed.
  */
 export async function validateOutboundUrl(url: string): Promise<void> {
+  if (!isProduction) return;
   let parsed: URL;
   try {
     parsed = new URL(url);

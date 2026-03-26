@@ -11,97 +11,108 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
-import type { WorkflowStepDefinition, WorkflowStepResult } from "@/lib/api";
+import type { WorkflowGraph, WorkflowStepResult } from "@/lib/api";
 import { BaseNode, type StepNodeData, type StepExecutionStatus } from "./nodes/base-node";
-
-const NODE_SPACING_Y = 120;
-const NODE_CENTER_X = 250;
+import { ConditionNode, type ConditionNodeData } from "./nodes/condition-node";
 
 const nodeTypes: NodeTypes = {
   step: BaseNode,
+  condition: ConditionNode,
 };
 
-function getStepStatus(
-  stepIndex: number,
-  currentStepIndex: number | null,
-  workflowStatus: string,
-  stepResults: WorkflowStepResult[],
-): StepExecutionStatus {
-  const result = stepResults.find((r) => r.stepIndex === stepIndex);
-
-  if (result) {
-    if (result.status === "completed") return "completed";
-    if (result.status === "failed") return "failed";
-    if (result.status === "skipped") return "skipped";
-  }
-
-  if (stepIndex === currentStepIndex) {
-    if (workflowStatus === "sleeping") return "sleeping";
-    if (workflowStatus === "waiting") return "waiting";
-    if (workflowStatus === "running") return "running";
-  }
-
-  return "idle";
-}
-
 export function ExecutionCanvas({
-  steps,
+  graph,
   stepResults,
-  currentStepIndex,
+  currentStepId,
   workflowStatus,
 }: {
-  steps: WorkflowStepDefinition[];
+  graph: WorkflowGraph;
   stepResults: WorkflowStepResult[];
-  currentStepIndex: number | null;
+  currentStepId: string | null;
   workflowStatus: string;
 }) {
-  const nodes = useMemo<Node<StepNodeData>[]>(
-    () =>
-      steps.map((step, i) => {
-        const result = stepResults.find((r) => r.stepIndex === i);
-        return {
-          id: step.id,
-          type: "step",
-          position: { x: NODE_CENTER_X, y: i * NODE_SPACING_Y },
-          draggable: false,
-          data: {
-            step,
-            index: i,
-            executionStatus: getStepStatus(i, currentStepIndex, workflowStatus, stepResults),
-            durationMs: result?.durationMs ?? undefined,
-            onSelect: () => {},
-            onDelete: () => {},
-          },
-        };
-      }),
-    [steps, stepResults, currentStepIndex, workflowStatus],
+  const resultMap = useMemo(
+    () => new Map(stepResults.map((r) => [r.stepId, r])),
+    [stepResults],
   );
 
-  const edges = useMemo<Edge[]>(() => {
-    const result: Edge[] = [];
-    for (let i = 0; i < steps.length - 1; i++) {
-      const sourceResult = stepResults.find((r) => r.stepIndex === i);
-      const isCompleted = sourceResult?.status === "completed";
-      result.push({
-        id: `e-${steps[i].id}-${steps[i + 1].id}`,
-        source: steps[i].id,
-        target: steps[i + 1].id,
-        animated: isCompleted,
-        style: {
-          stroke: isCompleted
-            ? "var(--color-alive)"
-            : "var(--color-muted-foreground)",
-          strokeWidth: isCompleted ? 2 : 1.5,
-        },
-      });
+  const getStatus = (nodeId: string): StepExecutionStatus => {
+    const result = resultMap.get(nodeId);
+    if (result) {
+      if (result.status === "completed") return "completed";
+      if (result.status === "failed") return "failed";
+      if (result.status === "skipped") return "skipped";
     }
-    return result;
-  }, [steps, stepResults]);
+    if (nodeId === currentStepId) {
+      if (workflowStatus === "sleeping") return "sleeping";
+      if (workflowStatus === "waiting") return "waiting";
+      if (workflowStatus === "running") return "running";
+    }
+    return "idle";
+  };
 
-  const canvasHeight = Math.max(350, steps.length * NODE_SPACING_Y + 100);
+  const realNodes = useMemo(() => graph.nodes.filter((n) => (n.type as string) !== "start" && (n.type as string) !== "end"), [graph.nodes]);
+  const realNodeIds = useMemo(() => new Set(realNodes.map((n) => n.id)), [realNodes]);
+
+  const nodes = useMemo<Node[]>(
+    () =>
+      realNodes.map((node) => {
+        if (node.type === "condition") {
+          const condResult = resultMap.get(node.id)?.output as { result?: boolean } | undefined;
+          return {
+            id: node.id, type: "condition", position: node.position ?? { x: 250, y: 200 }, draggable: false,
+            data: {
+              node, executionStatus: getStatus(node.id), result: condResult?.result,
+              onSelect: () => {},
+            } satisfies ConditionNodeData,
+          };
+        }
+        return {
+          id: node.id, type: "step", position: node.position ?? { x: 250, y: 200 }, draggable: false,
+          data: {
+            node, executionStatus: getStatus(node.id),
+            durationMs: resultMap.get(node.id)?.durationMs ?? undefined,
+            onSelect: () => {}, onDelete: () => {},
+          } satisfies StepNodeData,
+        };
+      }),
+    [realNodes, stepResults, currentStepId, workflowStatus],
+  );
+
+  const edges = useMemo<Edge[]>(
+    () =>
+      graph.edges.filter((e) => realNodeIds.has(e.source) && realNodeIds.has(e.target)).map((edge) => {
+        const sourceCompleted = resultMap.get(edge.source)?.status === "completed";
+        const isConditionEdge = edge.sourceHandle === "true" || edge.sourceHandle === "false";
+        const isLoop = !!edge.loop;
+
+        let stroke = "var(--color-muted-foreground)";
+        let strokeWidth = 1.5;
+        let strokeDasharray: string | undefined;
+
+        if (sourceCompleted) { stroke = "var(--color-alive)"; strokeWidth = 2; }
+        else if (isLoop) { stroke = "#22d3ee"; strokeDasharray = "6 3"; }
+        else if (isConditionEdge) {
+          stroke = edge.sourceHandle === "true" ? "var(--color-alive)" : "var(--color-critical)";
+          strokeDasharray = "6 3";
+        }
+
+        return {
+          id: edge.id,
+          source: edge.source,
+          sourceHandle: edge.sourceHandle ?? "default",
+          target: edge.target,
+          targetHandle: "input",
+          animated: !!sourceCompleted,
+          label: edge.label ?? (isConditionEdge ? edge.sourceHandle : undefined) ?? (isLoop ? "loop" : undefined),
+          style: { stroke, strokeWidth, strokeDasharray },
+        };
+      }),
+    [graph.edges, stepResults],
+  );
 
   return (
-    <div className="w-full rounded-lg border bg-card overflow-hidden" style={{ height: canvasHeight }}>
+    <div className="w-full rounded-lg border bg-card overflow-hidden" style={{ height: Math.max(400, graph.nodes.length * 100 + 150) }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -112,7 +123,7 @@ export function ExecutionCanvas({
         panOnDrag
         zoomOnScroll
         fitView
-        minZoom={0.5}
+        minZoom={0.3}
         maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
         className="bg-background"

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, inArray } from 'drizzle-orm';
 import { RedpandaService } from '../redpanda/redpanda.service';
 import { TOPICS, CONSUMER_GROUPS } from '../redpanda/redpanda.constants';
 import { DRIZZLE, type Database } from '../database/database.provider';
@@ -18,16 +18,26 @@ import type {
   JobRunLogEvent,
 } from '../redpanda/redpanda.interfaces';
 import type {
-  WorkflowStepDefinition,
-  FanOutStepConfig,
+  WorkflowGraph,
+  WorkflowNodeDefinition,
+  WorkflowEdgeDefinition,
   RunStepConfig,
   SleepStepConfig,
-  SpawnStepConfig,
-  SignalParentStepConfig,
-  SignalChildStepConfig,
-  WaitForSignalStepConfig,
+  RunJobConfig,
+  ConditionNodeConfig,
+  FanOutNodeConfig,
+  WebhookWaitConfig,
 } from '../workflow/workflow.types';
+import { evaluateExpression } from './expression-evaluator';
 import { validateOutboundUrl } from '../common/util/url-validator';
+import {
+  buildAdjacency,
+  computeFrontier,
+  getLoopBodyNodes,
+  isGraphFormat,
+  migrateLinearToGraph,
+  type AdjacencyMap,
+} from './graph-utils';
 
 @Injectable()
 export class WorkflowEngineService implements OnModuleInit {
@@ -57,6 +67,8 @@ export class WorkflowEngineService implements OnModuleInit {
     this.logger.log('Workflow engine consumer started');
   }
 
+  // ── Helpers ─────────────────────────────────────────────────
+
   private async emitLog(
     jobId: string,
     runId: string,
@@ -65,11 +77,7 @@ export class WorkflowEngineService implements OnModuleInit {
     metadata?: Record<string, unknown>,
   ) {
     const logEvent: JobRunLogEvent = {
-      runId,
-      jobId,
-      level,
-      message,
-      metadata,
+      runId, jobId, level, message, metadata,
       timestamp: new Date().toISOString(),
     };
     await this.redpanda.publish(TOPICS.JOB_RUN_LOGS.name, runId, logEvent);
@@ -84,33 +92,24 @@ export class WorkflowEngineService implements OnModuleInit {
     durationMs?: number,
   ) {
     const event: WorkflowStepResultEvent = {
-      workflowRunId,
-      jobId,
-      stepId,
-      stepIndex,
-      status,
-      durationMs,
+      workflowRunId, jobId, stepId, stepIndex, status, durationMs,
       timestamp: new Date().toISOString(),
     };
     await this.redpanda.publish(TOPICS.WORKFLOW_STEP_RESULTS.name, workflowRunId, event);
   }
 
+  // ── Entry point ─────────────────────────────────────────────
+
   private async replay(event: WorkflowResumeEvent) {
-    // Load the workflow run
     const [wfRun] = await this.db
-      .select()
-      .from(workflowRuns)
+      .select().from(workflowRuns)
       .where(eq(workflowRuns.id, event.workflowRunId))
       .limit(1);
 
-    if (!wfRun || wfRun.status === 'completed' || wfRun.status === 'cancelled' || wfRun.status === 'failed') {
-      return;
-    }
+    if (!wfRun || ['completed', 'cancelled', 'failed'].includes(wfRun.status)) return;
 
-    // Load the workflow definition
     const [workflow] = await this.db
-      .select()
-      .from(workflows)
+      .select().from(workflows)
       .where(eq(workflows.id, wfRun.workflowId))
       .limit(1);
 
@@ -119,534 +118,433 @@ export class WorkflowEngineService implements OnModuleInit {
       return;
     }
 
-    // Load the job run to get jobId
     const [jobRun] = await this.db
-      .select()
-      .from(jobRuns)
+      .select().from(jobRuns)
       .where(eq(jobRuns.id, wfRun.jobRunId))
       .limit(1);
 
     if (!jobRun) return;
 
-    const steps = workflow.steps as WorkflowStepDefinition[];
+    // Detect format: graph or legacy array
+    const graph: WorkflowGraph = isGraphFormat(workflow.steps)
+      ? workflow.steps
+      : migrateLinearToGraph(workflow.steps as any[]);
 
-    // Load all existing step results (memoized)
+    await this.replayGraph(event, wfRun, graph, jobRun);
+  }
+
+  // ── Graph-based replay ──────────────────────────────────────
+
+  private async replayGraph(
+    event: WorkflowResumeEvent,
+    wfRun: typeof workflowRuns.$inferSelect,
+    graph: WorkflowGraph,
+    jobRun: typeof jobRuns.$inferSelect,
+  ) {
+    const adjacency = buildAdjacency(graph);
+
+    // Load memoized results
     const existingResults = await this.db
-      .select()
-      .from(workflowStepResults)
-      .where(eq(workflowStepResults.workflowRunId, wfRun.id))
-      .orderBy(workflowStepResults.stepIndex);
+      .select().from(workflowStepResults)
+      .where(eq(workflowStepResults.workflowRunId, wfRun.id));
 
-    const resultMap = new Map(existingResults.map((r) => [r.stepIndex, r]));
+    const resultMap = new Map(existingResults.map((r) => [r.stepId, r]));
+    const completedNodeIds = new Set(
+      existingResults.filter((r) => r.status === 'completed' || r.status === 'skipped').map((r) => r.stepId),
+    );
+
+    // Build context from completed node outputs
     let context: Record<string, unknown> = (wfRun.context as Record<string, unknown>) ?? {};
+    for (const result of existingResults) {
+      if (result.status === 'completed' && result.output) {
+        context[result.stepId] = result.output;
+      }
+    }
 
-    // If resuming from signal, inject the signal payload into context
-    if (event.reason === 'signal_received' && event.signalPayload) {
+    // Inject signal/child payloads on resume
+    if ((event.reason === 'signal_received' || event.reason === 'child_completed') && event.signalPayload) {
       context.__lastSignal = event.signalPayload;
     }
 
-    // If resuming from child completion, inject child result into context
-    if (event.reason === 'child_completed' && event.signalPayload) {
-      context.__lastSignal = event.signalPayload;
-    }
-
-    // Replay loop
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-      const existing = resultMap.get(i);
-
-      // Memoize: skip completed steps
-      if (existing) {
-        if (existing.status === 'completed' && existing.output) {
-          context[step.id] = existing.output;
+    // Build condition results map from completed condition nodes
+    const conditionResults = new Map<string, boolean>();
+    for (const node of graph.nodes) {
+      if (node.type === 'condition' && resultMap.has(node.id)) {
+        const output = resultMap.get(node.id)!.output as { result?: boolean } | null;
+        if (output?.result !== undefined) {
+          conditionResults.set(node.id, output.result);
         }
-        continue;
+      }
+    }
+
+    // Compute frontier
+    const frontier = computeFrontier(graph, adjacency, completedNodeIds, conditionResults);
+
+    if (frontier.length === 0) {
+      // No more nodes to execute — workflow is complete
+      if (existingResults.length > 0) {
+        await this.completeWorkflow(wfRun, jobRun, context);
+      }
+      return;
+    }
+
+    // Execute frontier nodes one at a time (sequential for now — parallel comes later)
+    for (const nodeId of frontier) {
+      const entry = adjacency.get(nodeId);
+      if (!entry) continue;
+
+      await this.executeGraphNode(
+        entry.node, graph, adjacency, wfRun, jobRun, context, resultMap, conditionResults,
+      );
+
+      // After executing one node, publish resume to continue the frontier
+      // This lets sleep/wait nodes pause correctly
+      break; // Execute one node per resume cycle
+    }
+  }
+
+  // ── Execute a single graph node ─────────────────────────────
+
+  private async executeGraphNode(
+    node: WorkflowNodeDefinition,
+    graph: WorkflowGraph,
+    adjacency: AdjacencyMap,
+    wfRun: typeof workflowRuns.$inferSelect,
+    jobRun: typeof jobRuns.$inferSelect,
+    context: Record<string, unknown>,
+    resultMap: Map<string, typeof workflowStepResults.$inferSelect>,
+    conditionResults: Map<string, boolean>,
+  ) {
+    const startedAt = new Date();
+
+    await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
+      `Executing node: ${node.name} (${node.type})`,
+      { nodeId: node.id },
+    );
+
+    try {
+      switch (node.type) {
+        case 'run': {
+          const config = node.config as RunStepConfig;
+          const result = await this.executeRunStep(config, context);
+          const finishedAt = new Date();
+          const durationMs = finishedAt.getTime() - startedAt.getTime();
+
+          await this.recordNodeResult(wfRun.id, node.id, 'completed', result, durationMs, startedAt);
+          context[node.id] = result;
+
+          await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Node ${node.name} completed`);
+          await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'completed', durationMs);
+
+          // Check outgoing edges for loops
+          await this.handleOutgoingEdges(node.id, graph, adjacency, wfRun, jobRun, context);
+          break;
+        }
+
+        case 'sleep': {
+          const config = node.config as SleepStepConfig;
+          const resumeAt = this.parseDuration(config.duration);
+
+          await this.recordNodeResult(wfRun.id, node.id, 'completed', { resumeAt: resumeAt.toISOString() }, 0, startedAt);
+
+          await this.db.update(workflowRuns).set({
+            status: 'sleeping',
+            currentStepId: node.id,
+            context,
+            resumeAt,
+          }).where(eq(workflowRuns.id, wfRun.id));
+
+          await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Sleeping until ${resumeAt.toISOString()}`);
+          return; // Sleeper will resume
+        }
+
+        case 'condition': {
+          const config = node.config as ConditionNodeConfig;
+          const result = evaluateExpression(config.expression, context);
+          const output = { expression: config.expression, result };
+          const finishedAt = new Date();
+
+          await this.recordNodeResult(wfRun.id, node.id, 'completed', output, finishedAt.getTime() - startedAt.getTime(), startedAt);
+          context[node.id] = output;
+          conditionResults.set(node.id, result);
+
+          await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
+            `Condition "${node.name}": ${config.expression} → ${result}`,
+          );
+          await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'completed');
+          await this.continueGraph(wfRun, context);
+          break;
+        }
+
+        case 'run_job': {
+          const config = node.config as RunJobConfig;
+
+          // Find latest workflow for target job
+          const [targetWorkflow] = await this.db.select().from(workflows)
+            .where(eq(workflows.jobId, config.targetJobId))
+            .orderBy(desc(workflows.version))
+            .limit(1);
+
+          if (!targetWorkflow) {
+            throw new Error(`No workflow found for job ${config.targetJobId}`);
+          }
+
+          // Create child job run + workflow run
+          const [childJobRun] = await this.db.insert(jobRuns)
+            .values({ jobId: config.targetJobId, trigger: 'retry', scheduledAt: new Date() })
+            .returning();
+
+          const [childWfRun] = await this.db.insert(workflowRuns)
+            .values({
+              workflowId: targetWorkflow.id,
+              jobRunId: childJobRun.id,
+              status: 'running',
+              currentStepIndex: 0,
+              context: config.input ?? {},
+            })
+            .returning();
+
+          // Start child
+          await this.redpanda.publish(TOPICS.WORKFLOW_RESUME.name, childWfRun.id, {
+            workflowRunId: childWfRun.id,
+            reason: 'initial',
+            timestamp: new Date().toISOString(),
+          });
+
+          const output = { childRunId: childWfRun.id, childJobRunId: childJobRun.id };
+          await this.recordNodeResult(wfRun.id, node.id, 'completed', output, new Date().getTime() - startedAt.getTime(), startedAt);
+          context[node.id] = output;
+
+          if (config.mode === 'wait') {
+            await this.db.update(workflowRuns).set({
+              status: 'waiting',
+              currentStepId: node.id,
+              context,
+              waitingForChildRunId: childWfRun.id,
+            }).where(eq(workflowRuns.id, wfRun.id));
+
+            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Spawned child workflow, waiting for completion');
+            return; // Sleeper will resume when child completes
+          }
+
+          await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Spawned child workflow (fire-and-forget)');
+          await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'completed');
+          await this.continueGraph(wfRun, context);
+          break;
+        }
+
+        case 'fan_out': {
+          await this.recordNodeResult(wfRun.id, node.id, 'completed', {}, 0, startedAt);
+          context[node.id] = {};
+          await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'completed');
+          await this.continueGraph(wfRun, context);
+          break;
+        }
+
+        case 'webhook_wait': {
+          const config = node.config as WebhookWaitConfig;
+
+          // Check signal buffer first — maybe a signal arrived before we got here
+          const [pendingSignal] = await this.db
+            .select().from(workflowSignals)
+            .where(
+              and(
+                eq(workflowSignals.targetRunId, wfRun.id),
+                eq(workflowSignals.delivered, false),
+              ),
+            )
+            .orderBy(workflowSignals.createdAt)
+            .limit(1);
+
+          if (pendingSignal) {
+            // Signal already buffered — deliver and continue
+            await this.db.update(workflowSignals)
+              .set({ delivered: true, deliveredAt: new Date() })
+              .where(eq(workflowSignals.id, pendingSignal.id));
+
+            const output = { signal: pendingSignal.payload, sourceRunId: pendingSignal.sourceRunId };
+            await this.recordNodeResult(wfRun.id, node.id, 'completed', output, 0, startedAt);
+            context[node.id] = output;
+
+            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Webhook signal found in buffer, continuing');
+            await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'completed');
+            await this.continueGraph(wfRun, context);
+            break;
+          }
+
+          // No signal — pause and wait
+          const waitTimeoutAt = config.timeoutDuration
+            ? this.parseDuration(config.timeoutDuration)
+            : null;
+
+          await this.db.update(workflowRuns).set({
+            status: 'waiting',
+            currentStepId: node.id,
+            context,
+            waitTimeoutAt,
+          }).where(eq(workflowRuns.id, wfRun.id));
+
+          await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
+            `Waiting for webhook${waitTimeoutAt ? ` (timeout: ${waitTimeoutAt.toISOString()})` : ''}`,
+          );
+          return; // Signal delivery consumer will resume
+        }
+      }
+    } catch (err: any) {
+      const finishedAt = new Date();
+      const errorMessage = err.message ?? String(err);
+
+      await this.recordNodeResult(wfRun.id, node.id, 'failed', undefined, finishedAt.getTime() - startedAt.getTime(), startedAt, errorMessage);
+
+      await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'error', `Node ${node.name} failed: ${errorMessage}`);
+      await this.emitStepResult(wfRun.id, jobRun.jobId, node.id, 0, 'failed', finishedAt.getTime() - startedAt.getTime());
+
+      const onFailure = node.onFailure ?? 'abort';
+      if (onFailure === 'abort') {
+        await this.db.update(workflowRuns)
+          .set({ status: 'failed', finishedAt, context })
+          .where(eq(workflowRuns.id, wfRun.id));
+        await this.publishJobResult(jobRun, 'failed', errorMessage, startedAt);
+      } else if (onFailure === 'continue') {
+        // Mark as completed (with failure noted) and continue
+        await this.continueGraph(wfRun, context);
+      }
+    }
+  }
+
+  // ── Graph continuation ──────────────────────────────────────
+
+  private async handleOutgoingEdges(
+    nodeId: string,
+    graph: WorkflowGraph,
+    adjacency: AdjacencyMap,
+    wfRun: typeof workflowRuns.$inferSelect,
+    jobRun: typeof jobRuns.$inferSelect,
+    context: Record<string, unknown>,
+  ) {
+    const entry = adjacency.get(nodeId);
+    if (!entry) return;
+
+    // Check for loop back-edges
+    for (const edge of entry.outgoing) {
+      if (!edge.loop) continue;
+
+      const loopCounters = (wfRun.loopCounters as Record<string, number>) ?? {};
+      const iteration = (loopCounters[edge.id] ?? 0) + 1;
+
+      if (iteration > (edge.loop.maxIterations ?? 100)) {
+        throw new Error(`Loop exceeded max iterations (${edge.loop.maxIterations})`);
       }
 
-      // Execute this step
-      await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Executing step: ${step.name} (${step.type})`, {
-        stepId: step.id,
-        stepIndex: i,
+      const conditionMet = evaluateExpression(edge.loop.untilExpression, context);
+
+      if (conditionMet) {
+        // Loop done — clear counter, continue forward
+        delete loopCounters[edge.id];
+        await this.db.update(workflowRuns)
+          .set({ loopCounters })
+          .where(eq(workflowRuns.id, wfRun.id));
+
+        await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
+          `Loop completed after ${iteration - 1} iteration(s)`,
+        );
+        await this.continueGraph(wfRun, context);
+        return;
+      }
+
+      // Loop back — clear results for loop body and resume from target
+      loopCounters[edge.id] = iteration;
+      const loopBody = getLoopBodyNodes(graph, edge);
+      const bodyIds = [...loopBody];
+
+      if (bodyIds.length > 0) {
+        await this.db.delete(workflowStepResults)
+          .where(
+            and(
+              eq(workflowStepResults.workflowRunId, wfRun.id),
+              inArray(workflowStepResults.stepId, bodyIds),
+            ),
+          );
+
+        for (const id of bodyIds) {
+          delete context[id];
+        }
+      }
+
+      await this.db.update(workflowRuns)
+        .set({ currentStepId: edge.target, context, loopCounters })
+        .where(eq(workflowRuns.id, wfRun.id));
+
+      await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
+        `Loop iteration ${iteration}: jumping back to "${edge.target}"`,
+      );
+
+      await this.redpanda.publish(TOPICS.WORKFLOW_RESUME.name, wfRun.id, {
+        workflowRunId: wfRun.id,
+        reason: 'loop_iteration',
+        timestamp: new Date().toISOString(),
       });
-
-      const startedAt = new Date();
-
-      try {
-        switch (step.type) {
-          case 'run': {
-            const result = await this.executeRunStep(step.config as RunStepConfig, context);
-            const finishedAt = new Date();
-
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: 'completed',
-              output: result,
-              durationMs: finishedAt.getTime() - startedAt.getTime(),
-              startedAt,
-              finishedAt,
-            });
-
-            context[step.id] = result;
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Step ${step.name} completed`);
-            await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed', finishedAt.getTime() - startedAt.getTime());
-            break;
-          }
-
-          case 'sleep': {
-            const config = step.config as SleepStepConfig;
-            const resumeAt = this.parseDuration(config.duration);
-
-            await this.db
-              .update(workflowRuns)
-              .set({
-                status: 'sleeping',
-                currentStepIndex: i,
-                context,
-                resumeAt,
-              })
-              .where(eq(workflowRuns.id, wfRun.id));
-
-            // Record step as completed (the sleep itself is the action)
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: 'completed',
-              output: { resumeAt: resumeAt.toISOString() },
-              durationMs: 0,
-              startedAt,
-              finishedAt: startedAt,
-            });
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Sleeping until ${resumeAt.toISOString()}`);
-            return; // Stop processing — sleeper will resume us
-          }
-
-          case 'spawn': {
-            const config = step.config as SpawnStepConfig;
-
-            // 1. Find latest workflow for targetJobId
-            const [targetWorkflow] = await this.db
-              .select()
-              .from(workflows)
-              .where(eq(workflows.jobId, config.targetJobId))
-              .orderBy(desc(workflows.version))
-              .limit(1);
-
-            if (!targetWorkflow) {
-              throw new Error(`No workflow found for job ${config.targetJobId}`);
-            }
-
-            // 2. Create job run for child
-            const [childJobRun] = await this.db
-              .insert(jobRuns)
-              .values({
-                jobId: config.targetJobId,
-                trigger: 'retry',
-                scheduledAt: new Date(),
-              })
-              .returning();
-
-            // 3. Create workflow run for child
-            const [childWfRun] = await this.db
-              .insert(workflowRuns)
-              .values({
-                workflowId: targetWorkflow.id,
-                jobRunId: childJobRun.id,
-                status: 'running',
-                currentStepIndex: 0,
-                context: config.input ?? {},
-              })
-              .returning();
-
-            // 4. Publish resume to start child
-            await this.redpanda.publish(TOPICS.WORKFLOW_RESUME.name, childWfRun.id, {
-              workflowRunId: childWfRun.id,
-              reason: 'initial',
-              timestamp: new Date().toISOString(),
-            });
-
-            // 5. Record step result
-            const output = { childRunId: childWfRun.id, childJobRunId: childJobRun.id };
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: 'completed',
-              output,
-              durationMs: new Date().getTime() - startedAt.getTime(),
-              startedAt,
-              finishedAt: new Date(),
-            });
-            context[step.id] = output;
-
-            // 6. If waitForCompletion, pause parent
-            if (config.waitForCompletion) {
-              await this.db
-                .update(workflowRuns)
-                .set({
-                  status: 'waiting',
-                  currentStepIndex: i,
-                  context,
-                  waitingForChildRunId: childWfRun.id,
-                })
-                .where(eq(workflowRuns.id, wfRun.id));
-
-              await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Spawned child workflow, waiting for completion`);
-              return; // Stop — sleeper will resume when child completes
-            }
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Spawned child workflow (fire-and-forget)`);
-            await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed');
-            break;
-          }
-
-          case 'signal_parent': {
-            const config = step.config as SignalParentStepConfig;
-
-            // Find parent: look up jobRun.parentRunId → find parent's workflow run
-            const parentJobRunId = jobRun.parentRunId;
-
-            if (!parentJobRunId) {
-              await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'warn', 'No parent run to signal');
-
-              // Record as completed (no-op)
-              const finishedAt = new Date();
-              await this.db.insert(workflowStepResults).values({
-                workflowRunId: wfRun.id,
-                stepId: step.id,
-                stepIndex: i,
-                status: 'completed',
-                output: { signaled: false, reason: 'no_parent' },
-                durationMs: finishedAt.getTime() - startedAt.getTime(),
-                startedAt,
-                finishedAt,
-              });
-              context[step.id] = { signaled: false, reason: 'no_parent' };
-              break;
-            }
-
-            // Find parent's workflow run
-            const [parentWfRun] = await this.db
-              .select()
-              .from(workflowRuns)
-              .where(eq(workflowRuns.jobRunId, parentJobRunId))
-              .limit(1);
-
-            if (parentWfRun) {
-              // Write to signal buffer
-              await this.db.insert(workflowSignals).values({
-                targetRunId: parentWfRun.id,
-                sourceRunId: wfRun.id,
-                sourceStepId: step.id,
-                payload: config.payload ?? {},
-              });
-
-              // Publish to Kafka for real-time delivery
-              const signalEvent: WorkflowSignalEvent = {
-                targetRunId: parentWfRun.id,
-                sourceRunId: wfRun.id,
-                sourceStepId: step.id,
-                payload: config.payload ?? {},
-                timestamp: new Date().toISOString(),
-              };
-              await this.redpanda.publish(TOPICS.WORKFLOW_SIGNALS.name, parentWfRun.id, signalEvent);
-            }
-
-            // Record step result
-            const finishedAt = new Date();
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: 'completed',
-              output: { signaled: !!parentWfRun, targetRunId: parentWfRun?.id },
-              durationMs: finishedAt.getTime() - startedAt.getTime(),
-              startedAt,
-              finishedAt,
-            });
-            context[step.id] = { signaled: !!parentWfRun, targetRunId: parentWfRun?.id };
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Signaled parent workflow`);
-            await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed');
-            break;
-          }
-
-          case 'signal_child': {
-            const config = step.config as SignalChildStepConfig;
-
-            // Look up child run ID from context (set by spawn step)
-            const spawnOutput = context[config.spawnStepId] as { childRunId?: string } | undefined;
-            if (!spawnOutput?.childRunId) {
-              throw new Error(`Spawn step "${config.spawnStepId}" not found in context`);
-            }
-
-            // Write signal + publish
-            await this.db.insert(workflowSignals).values({
-              targetRunId: spawnOutput.childRunId,
-              sourceRunId: wfRun.id,
-              sourceStepId: step.id,
-              payload: config.payload ?? {},
-            });
-
-            const signalEvent: WorkflowSignalEvent = {
-              targetRunId: spawnOutput.childRunId,
-              sourceRunId: wfRun.id,
-              sourceStepId: step.id,
-              payload: config.payload ?? {},
-              timestamp: new Date().toISOString(),
-            };
-            await this.redpanda.publish(TOPICS.WORKFLOW_SIGNALS.name, spawnOutput.childRunId, signalEvent);
-
-            // Record step result
-            const finishedAt = new Date();
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: 'completed',
-              output: { signaledChildRunId: spawnOutput.childRunId },
-              durationMs: finishedAt.getTime() - startedAt.getTime(),
-              startedAt,
-              finishedAt,
-            });
-            context[step.id] = { signaledChildRunId: spawnOutput.childRunId };
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', `Signaled child workflow ${spawnOutput.childRunId}`);
-            await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed');
-            break;
-          }
-
-          case 'wait_for_signal': {
-            const config = step.config as WaitForSignalStepConfig;
-
-            // CHECK BUFFER FIRST — look for undelivered signals in DB
-            const [pendingSignal] = await this.db
-              .select()
-              .from(workflowSignals)
-              .where(
-                and(
-                  eq(workflowSignals.targetRunId, wfRun.id),
-                  eq(workflowSignals.delivered, false),
-                ),
-              )
-              .orderBy(workflowSignals.createdAt)
-              .limit(1);
-
-            if (pendingSignal) {
-              // Signal already buffered — deliver immediately
-              await this.db
-                .update(workflowSignals)
-                .set({ delivered: true, deliveredAt: new Date() })
-                .where(eq(workflowSignals.id, pendingSignal.id));
-
-              const finishedAt = new Date();
-              await this.db.insert(workflowStepResults).values({
-                workflowRunId: wfRun.id,
-                stepId: step.id,
-                stepIndex: i,
-                status: 'completed',
-                output: { signal: pendingSignal.payload, sourceRunId: pendingSignal.sourceRunId },
-                durationMs: 0,
-                startedAt,
-                finishedAt,
-              });
-              context[step.id] = { signal: pendingSignal.payload, sourceRunId: pendingSignal.sourceRunId };
-
-              await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Signal found in buffer, continuing');
-              await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed');
-              break; // Continue to next step
-            }
-
-            // No buffered signal — wait
-            const waitTimeoutAt = config.timeoutDuration
-              ? this.parseDuration(config.timeoutDuration)
-              : null;
-
-            await this.db
-              .update(workflowRuns)
-              .set({
-                status: 'waiting',
-                currentStepIndex: i,
-                context,
-                waitTimeoutAt,
-              })
-              .where(eq(workflowRuns.id, wfRun.id));
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Waiting for signal...');
-            return; // Stop — signal delivery consumer will resume
-          }
-
-          case 'fan_out': {
-            const config = step.config as FanOutStepConfig;
-            const branches = config.branches;
-            const concurrency = config.concurrency ?? branches.length;
-            const failFast = config.failFast ?? false;
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
-              `Fan-out: executing ${branches.length} branches (concurrency: ${concurrency})`,
-            );
-
-            const branchResults: Record<string, { status: string; output?: unknown; error?: string; durationMs: number }> = {};
-            let aborted = false;
-
-            // Execute branches with concurrency limit
-            const queue = [...branches];
-            const executing = new Set<Promise<void>>();
-
-            const runBranch = async (branch: typeof branches[number]) => {
-              if (aborted) return;
-              const branchStart = new Date();
-              try {
-                const result = await this.executeRunStep(branch.config, context);
-                branchResults[branch.id] = {
-                  status: 'completed',
-                  output: result,
-                  durationMs: new Date().getTime() - branchStart.getTime(),
-                };
-                await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
-                  `Fan-out branch "${branch.name}" completed`,
-                );
-              } catch (branchErr: any) {
-                branchResults[branch.id] = {
-                  status: 'failed',
-                  error: branchErr.message ?? String(branchErr),
-                  durationMs: new Date().getTime() - branchStart.getTime(),
-                };
-                await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'error',
-                  `Fan-out branch "${branch.name}" failed: ${branchErr.message}`,
-                );
-                if (failFast) {
-                  aborted = true;
-                }
-              }
-            };
-
-            while (queue.length > 0 || executing.size > 0) {
-              while (queue.length > 0 && executing.size < concurrency && !aborted) {
-                const branch = queue.shift()!;
-                const promise = runBranch(branch).then(() => {
-                  executing.delete(promise);
-                });
-                executing.add(promise);
-              }
-              if (executing.size > 0) {
-                await Promise.race(executing);
-              }
-            }
-
-            const finishedAt = new Date();
-            const failedBranches = Object.entries(branchResults).filter(([, r]) => r.status === 'failed');
-            const allSucceeded = failedBranches.length === 0;
-
-            const output = {
-              branches: branchResults,
-              totalBranches: branches.length,
-              succeeded: Object.values(branchResults).filter((r) => r.status === 'completed').length,
-              failed: failedBranches.length,
-            };
-
-            await this.db.insert(workflowStepResults).values({
-              workflowRunId: wfRun.id,
-              stepId: step.id,
-              stepIndex: i,
-              status: allSucceeded ? 'completed' : 'failed',
-              output,
-              errorMessage: allSucceeded ? undefined : `${failedBranches.length} branch(es) failed`,
-              durationMs: finishedAt.getTime() - startedAt.getTime(),
-              startedAt,
-              finishedAt,
-            });
-
-            context[step.id] = output;
-
-            if (!allSucceeded) {
-              // Treat fan-out failure like a step failure — defer to onFailure
-              throw new Error(`${failedBranches.length}/${branches.length} fan-out branches failed`);
-            }
-
-            await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info',
-              `Fan-out completed: ${output.succeeded}/${output.totalBranches} branches succeeded`,
-            );
-            await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'completed', finishedAt.getTime() - startedAt.getTime());
-            break;
-          }
-        }
-      } catch (err: any) {
-        const finishedAt = new Date();
-        const errorMessage = err.message ?? String(err);
-
-        await this.db.insert(workflowStepResults).values({
-          workflowRunId: wfRun.id,
-          stepId: step.id,
-          stepIndex: i,
-          status: 'failed',
-          errorMessage,
-          durationMs: finishedAt.getTime() - startedAt.getTime(),
-          startedAt,
-          finishedAt,
-        });
-
-        await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'error', `Step ${step.name} failed: ${errorMessage}`);
-        await this.emitStepResult(wfRun.id, jobRun.jobId, step.id, i, 'failed', finishedAt.getTime() - startedAt.getTime());
-
-        const onFailure = step.onFailure ?? 'abort';
-
-        if (onFailure === 'abort') {
-          await this.db
-            .update(workflowRuns)
-            .set({ status: 'failed', finishedAt, context })
-            .where(eq(workflowRuns.id, wfRun.id));
-
-          await this.publishJobResult(jobRun, 'failed', errorMessage, startedAt);
-          return;
-        }
-
-        if (onFailure === 'continue') {
-          continue;
-        }
-
-        if (onFailure === 'goto' && step.onFailureGoto) {
-          const gotoIndex = steps.findIndex((s) => s.id === step.onFailureGoto);
-          if (gotoIndex >= 0) {
-            // Update context and jump — we'll need to restart the loop
-            // For simplicity, we recursively resume from the new position
-            await this.db
-              .update(workflowRuns)
-              .set({ currentStepIndex: gotoIndex, context })
-              .where(eq(workflowRuns.id, wfRun.id));
-
-            const resumeEvent: WorkflowResumeEvent = {
-              workflowRunId: wfRun.id,
-              reason: 'retry',
-              timestamp: new Date().toISOString(),
-            };
-            await this.redpanda.publish(TOPICS.WORKFLOW_RESUME.name, wfRun.id, resumeEvent);
-            return;
-          }
-          // If goto target not found, abort
-          await this.db
-            .update(workflowRuns)
-            .set({ status: 'failed', finishedAt, context })
-            .where(eq(workflowRuns.id, wfRun.id));
-          await this.publishJobResult(jobRun, 'failed', `Goto target "${step.onFailureGoto}" not found`, startedAt);
-          return;
-        }
-      }
+      return;
     }
 
-    // All steps completed
+    // No loops — normal continuation
+    await this.continueGraph(wfRun, context);
+  }
+
+  private async continueGraph(
+    wfRun: typeof workflowRuns.$inferSelect,
+    context: Record<string, unknown>,
+  ) {
+    await this.db.update(workflowRuns)
+      .set({ context })
+      .where(eq(workflowRuns.id, wfRun.id));
+
+    await this.redpanda.publish(TOPICS.WORKFLOW_RESUME.name, wfRun.id, {
+      workflowRunId: wfRun.id,
+      reason: 'initial', // re-enter replay to compute next frontier
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  private async completeWorkflow(
+    wfRun: typeof workflowRuns.$inferSelect,
+    jobRun: typeof jobRuns.$inferSelect,
+    context: Record<string, unknown>,
+  ) {
     const finishedAt = new Date();
-    await this.db
-      .update(workflowRuns)
+    await this.db.update(workflowRuns)
       .set({ status: 'completed', finishedAt, context })
       .where(eq(workflowRuns.id, wfRun.id));
 
     await this.publishJobResult(jobRun, 'success', undefined, wfRun.startedAt ?? finishedAt);
     await this.emitLog(jobRun.jobId, wfRun.jobRunId, 'info', 'Workflow completed successfully');
   }
+
+  // ── Record result ───────────────────────────────────────────
+
+  private async recordNodeResult(
+    workflowRunId: string,
+    stepId: string,
+    status: 'completed' | 'failed' | 'skipped',
+    output: unknown,
+    durationMs: number,
+    startedAt: Date,
+    errorMessage?: string,
+  ) {
+    await this.db.insert(workflowStepResults).values({
+      workflowRunId,
+      stepId,
+      stepIndex: 0, // legacy field, not meaningful in graph mode
+      status,
+      output,
+      errorMessage,
+      durationMs,
+      startedAt,
+      finishedAt: new Date(),
+    });
+  }
+
+  // ── Shared utilities ────────────────────────────────────────
 
   private async executeRunStep(
     config: RunStepConfig,
@@ -706,19 +604,14 @@ export class WorkflowEngineService implements OnModuleInit {
     const finishedAt = new Date();
     const durationMs = finishedAt.getTime() - startedAt.getTime();
 
-    // Update the job run
-    await this.db
-      .update(jobRuns)
+    await this.db.update(jobRuns)
       .set({ status, finishedAt, durationMs, errorMessage })
       .where(eq(jobRuns.id, jobRun.id));
 
-    // Publish result event for bridge/alerts
     const result: JobResultEvent = {
       jobId: jobRun.jobId,
       runId: jobRun.id,
-      status,
-      durationMs,
-      errorMessage,
+      status, durationMs, errorMessage,
       timestamp: finishedAt.toISOString(),
     };
 
@@ -726,7 +619,6 @@ export class WorkflowEngineService implements OnModuleInit {
   }
 
   private parseDuration(isoDuration: string): Date {
-    // Simple ISO 8601 duration parser for common cases
     const now = Date.now();
     const match = isoDuration.match(
       /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/,
@@ -763,20 +655,5 @@ export class WorkflowEngineService implements OnModuleInit {
       }
       return typeof value === 'string' ? value : JSON.stringify(value);
     });
-  }
-
-  private interpolatePayload(
-    payload: Record<string, unknown>,
-    context: Record<string, unknown>,
-  ): Record<string, unknown> {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(payload)) {
-      if (typeof value === 'string') {
-        result[key] = this.interpolateString(value, context);
-      } else {
-        result[key] = value;
-      }
-    }
-    return result;
   }
 }

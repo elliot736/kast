@@ -81,7 +81,7 @@ export interface JobRunLogEvent {
 
 export interface WorkflowResumeEvent {
   workflowRunId: string;
-  reason: 'initial' | 'sleep_expired' | 'signal_received' | 'child_completed' | 'retry';
+  reason: 'initial' | 'sleep_expired' | 'signal_received' | 'child_completed' | 'retry' | 'condition_jump' | 'loop_iteration';
   signalPayload?: unknown;
   timestamp: string;
 }

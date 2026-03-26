@@ -323,9 +323,13 @@ export default function RunDetailPage() {
 
           <TabsContent value="canvas" className="mt-3">
             <ExecutionCanvas
-              steps={wfRun.steps}
+              graph={
+                wfRun.steps && "nodes" in wfRun.steps
+                  ? wfRun.steps
+                  : { nodes: [], edges: [] }
+              }
               stepResults={wfRun.stepResults}
-              currentStepIndex={wfRun.currentStepIndex}
+              currentStepId={(wfRun as any).currentStepId ?? null}
               workflowStatus={wfRun.status}
             />
           </TabsContent>
@@ -337,7 +341,11 @@ export default function RunDetailPage() {
               </CardHeader>
               <CardContent>
                 <StepTimeline
-                  steps={wfRun.steps}
+                  steps={
+                    wfRun.steps && "nodes" in wfRun.steps
+                      ? (wfRun.steps.nodes as any[])
+                      : (wfRun.steps as any[])
+                  }
                   stepResults={wfRun.stepResults}
                   currentStepIndex={wfRun.currentStepIndex}
                   workflowStatus={wfRun.status}

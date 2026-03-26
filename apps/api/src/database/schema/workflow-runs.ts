@@ -1,6 +1,7 @@
 import {
   pgTable,
   uuid,
+  varchar,
   integer,
   timestamp,
   jsonb,
@@ -32,6 +33,9 @@ export const workflowRuns = pgTable(
     status: workflowRunStatusEnum('status').default('running').notNull(),
 
     currentStepIndex: integer('current_step_index').default(0),
+    currentStepId: varchar('current_step_id', { length: 255 }),
+    completedNodes: jsonb('completed_nodes').$type<string[]>().default([]),
+    loopCounters: jsonb('loop_counters').$type<Record<string, number>>().default({}),
     context: jsonb('context').$type<Record<string, unknown>>().default({}),
 
     // Sleep state

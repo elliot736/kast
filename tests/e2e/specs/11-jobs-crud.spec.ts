@@ -16,8 +16,6 @@ test.describe('Jobs CRUD', () => {
     const res = await client.createJob({
       name: 'E2E CRUD Job',
       slug: `e2e-crud-job-${Date.now()}`,
-      url: 'http://localhost:3001/health',
-      method: 'GET',
       schedule: '*/10 * * * *',
       tags: ['test', 'e2e'],
     });
@@ -25,19 +23,16 @@ test.describe('Jobs CRUD', () => {
     const job = await res.json();
     expect(job.id).toBeTruthy();
     expect(job.name).toBe('E2E CRUD Job');
-    expect(job.url).toBe('http://localhost:3001/health');
-    expect(job.method).toBe('GET');
     expect(job.schedule).toBe('*/10 * * * *');
     expect(job.nextRunAt).toBeTruthy();
     expect(job.status).toBe('active');
     jobId = job.id;
   });
 
-  test('create job with invalid data (missing url) returns 400', async ({ request }) => {
+  test('create job with invalid data (missing schedule) returns 400', async ({ request }) => {
     const client = createApiClient(request, apiKey);
     const res = await client.createJob({
       name: 'Invalid Job',
-      schedule: '*/5 * * * *',
     });
     expect(res.status()).toBe(400);
   });
@@ -101,12 +96,9 @@ test.describe('Jobs CRUD', () => {
 
   test('delete job and confirm 404', async ({ request }) => {
     const client = createApiClient(request, apiKey);
-    // Create a throwaway job to delete
     const createRes = await client.createJob({
       name: 'Delete Me Job',
       slug: `delete-me-job-${Date.now()}`,
-      url: 'http://localhost:3001/health',
-      method: 'GET',
       schedule: '*/30 * * * *',
     });
     const created = await createRes.json();

@@ -47,11 +47,10 @@ test.describe('Workflows', () => {
     });
     expect(res.ok()).toBeTruthy();
     const workflow = await res.json();
-    // Legacy arrays are auto-migrated to graph format
+    // Legacy arrays are auto-migrated to graph format (no start/end nodes)
     expect(workflow.steps.nodes).toBeDefined();
     expect(workflow.steps.edges).toBeDefined();
-    // 2 original steps + start + end = 4 nodes
-    expect(workflow.steps.nodes.length).toBe(4);
+    expect(workflow.steps.nodes.length).toBe(2);
     expect(workflow.version).toBeTruthy();
   });
 
@@ -61,7 +60,7 @@ test.describe('Workflows', () => {
     expect(res.ok()).toBeTruthy();
     const workflow = await res.json();
     expect(workflow.steps.nodes).toBeDefined();
-    expect(workflow.steps.nodes.length).toBe(4);
+    expect(workflow.steps.nodes.length).toBe(2);
     expect(workflow.version).toBeTruthy();
   });
 

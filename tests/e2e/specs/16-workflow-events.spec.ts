@@ -54,17 +54,7 @@ test.describe('Workflow Signals', () => {
     expect(workflow.steps.nodes).toBeDefined();
   });
 
-  test('trigger workflow and it enters waiting state', async ({ request }) => {
-    const client = createApiClient(request, apiKey);
-    const triggerRes = await client.triggerJob(jobId);
-    expect(triggerRes.ok()).toBeTruthy();
-    const run = await triggerRes.json();
-
-    await waitForWorkflowRunStatus(client, jobId, run.id, 'waiting', 30_000);
-
-    const wfRes = await client.getWorkflowRun(jobId, run.id);
-    expect(wfRes.ok()).toBeTruthy();
-    const wfRun = await wfRes.json();
-    expect(wfRun.status).toBe('waiting');
-  });
+  // Note: wait_for_signal was removed in the DAG rework.
+  // Legacy wait_for_signal steps are migrated to run nodes.
+  // Signal-based waiting will be re-added when webhook_wait is implemented.
 });

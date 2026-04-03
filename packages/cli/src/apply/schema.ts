@@ -119,17 +119,11 @@ const jobSchema = z.object({
   description: z.string().optional(),
   schedule: z.string().min(1),
   timezone: z.string().max(100).default('UTC'),
-  url: z.string(),
-  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('POST'),
-  headers: z.record(z.string()).default({}),
-  body: z.string().optional(),
-  timeoutSeconds: z.number().int().positive().max(300).default(30),
   tags: z.array(z.string()).default([]),
   team: z.string().optional(),     // team slug ref
   monitor: z.string().optional(),  // monitor slug ref
   retry: retrySchema.default({}),
   concurrency: concurrencySchema.default({}),
-  successStatusCodes: z.array(z.number().int().positive()).default([200, 201, 202, 204]),
   workflow: workflowSchema.optional(),
 });
 

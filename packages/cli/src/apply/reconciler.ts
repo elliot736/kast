@@ -178,11 +178,6 @@ export async function reconcile(config: KastConfig): Promise<ReconcilePlan> {
       ...(job.description && { description: job.description }),
       schedule: job.schedule,
       timezone: job.timezone,
-      url: job.url,
-      method: job.method,
-      headers: job.headers,
-      ...(job.body && { body: job.body }),
-      timeoutSeconds: job.timeoutSeconds,
       tags: job.tags,
       ...(teamId && { teamId }),
       ...(monitorId && { monitorId }),
@@ -192,7 +187,6 @@ export async function reconcile(config: KastConfig): Promise<ReconcilePlan> {
       retryMaxDelaySeconds: job.retry.maxDelaySeconds,
       concurrencyLimit: job.concurrency.limit,
       concurrencyPolicy: job.concurrency.policy,
-      successStatusCodes: job.successStatusCodes,
     };
 
     if (existing) {

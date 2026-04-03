@@ -29,13 +29,6 @@ export const jobs = pgTable(
     timezone: varchar('timezone', { length: 100 }).default('UTC'),
     status: jobStatusEnum('status').default('active').notNull(),
 
-    // HTTP trigger config
-    url: text('url').notNull(),
-    method: varchar('method', { length: 10 }).default('POST'),
-    headers: jsonb('headers').$type<Record<string, string>>().default({}),
-    body: text('body'),
-    timeoutSeconds: integer('timeout_seconds').default(30),
-
     // Retry policy
     maxRetries: integer('max_retries').default(0),
     retryDelaySeconds: integer('retry_delay_seconds').default(60),
@@ -45,7 +38,6 @@ export const jobs = pgTable(
     // Concurrency control
     concurrencyLimit: integer('concurrency_limit').default(1),
     concurrencyPolicy: varchar('concurrency_policy', { length: 20 }).default('queue'),
-    successStatusCodes: jsonb('success_status_codes').$type<number[]>().default([200, 201, 202, 204]),
 
     // Bridge to monitoring
     monitorId: uuid('monitor_id').references(() => monitors.id, { onDelete: 'set null' }),

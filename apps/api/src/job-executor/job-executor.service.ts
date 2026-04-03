@@ -12,7 +12,6 @@ import type {
   JobRunLogEvent,
   WorkflowResumeEvent,
 } from '../redpanda/redpanda.interfaces';
-import { validateOutboundUrl } from '../common/util/url-validator';
 
 @Injectable()
 export class JobExecutorService implements OnModuleInit {
@@ -158,123 +157,14 @@ export class JobExecutorService implements OnModuleInit {
       return;
     }
 
-    await this.emitLog(job.id, event.runId, 'info', 'Execution started', {
-      url: job.url,
-      method: job.method,
-      trigger: event.trigger,
-    });
-
-    // Mark run as running
-    const startedAt = new Date();
+    // No workflow — nothing to execute
+    await this.emitLog(job.id, event.runId, 'warn', 'No workflow configured');
     await this.db
       .update(jobRuns)
-      .set({ status: 'running', startedAt })
+      .set({ status: 'failed', errorMessage: 'No workflow configured', finishedAt: new Date() })
       .where(eq(jobRuns.id, event.runId));
 
-    let status: 'success' | 'failed' | 'timeout' = 'failed';
-    let httpStatus: number | undefined;
-    let responseBody: string | undefined;
-    let errorMessage: string | undefined;
-
-    const successCodes = (job.successStatusCodes as number[] | null) ?? [200, 201, 202, 204];
-
-    try {
-      // Interpolate body template
-      const body = job.body
-        ?.replace('{{run_id}}', event.runId)
-        .replace('{{scheduled_at}}', event.scheduledAt);
-
-      const controller = new AbortController();
-      const timeoutMs = (job.timeoutSeconds ?? 30) * 1000;
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-      await validateOutboundUrl(job.url);
-      await this.emitLog(job.id, event.runId, 'debug', `Sending ${job.method ?? 'POST'} request to ${job.url}`);
-
-      try {
-        const res = await fetch(job.url, {
-          method: job.method ?? 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'Kast/1.0',
-            ...(job.headers as Record<string, string>),
-          },
-          body: job.method !== 'GET' ? body : undefined,
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-        httpStatus = res.status;
-
-        const text = await res.text();
-        responseBody = text.slice(0, 65536);
-
-        if (successCodes.includes(res.status)) {
-          status = 'success';
-          await this.emitLog(job.id, event.runId, 'info', `HTTP ${res.status} — success`);
-        } else {
-          status = 'failed';
-          errorMessage = `HTTP ${res.status}: ${responseBody.slice(0, 500)}`;
-          await this.emitLog(job.id, event.runId, 'error', `HTTP ${res.status} — not in successStatusCodes`, {
-            httpStatus: res.status,
-            successCodes,
-          });
-        }
-      } catch (err: any) {
-        clearTimeout(timeoutId);
-        if (err.name === 'AbortError') {
-          status = 'timeout';
-          errorMessage = `Request timed out after ${job.timeoutSeconds}s`;
-          await this.emitLog(job.id, event.runId, 'error', errorMessage);
-        } else {
-          throw err;
-        }
-      }
-    } catch (err: any) {
-      status = 'failed';
-      errorMessage = err.message ?? String(err);
-      await this.emitLog(job.id, event.runId, 'error', `Request failed: ${errorMessage}`);
-    }
-
-    const finishedAt = new Date();
-    const durationMs = finishedAt.getTime() - startedAt.getTime();
-
-    // Update run
-    await this.db
-      .update(jobRuns)
-      .set({
-        status,
-        finishedAt,
-        durationMs,
-        httpStatus,
-        responseBody,
-        errorMessage,
-      })
-      .where(eq(jobRuns.id, event.runId));
-
-    // Publish result event
-    const result: JobResultEvent = {
-      jobId: job.id,
-      runId: event.runId,
-      status,
-      httpStatus,
-      durationMs,
-      errorMessage,
-      timestamp: finishedAt.toISOString(),
-    };
-
-    await this.redpanda.publish(TOPICS.JOB_RESULTS.name, job.id, result);
-
-    await this.emitLog(job.id, event.runId, 'info', `Execution completed: ${status} (${durationMs}ms)`);
-
-    // Handle retries on failure
-    if (status !== 'success') {
-      await this.scheduleRetry(job, event);
-    }
-
-    this.logger.log(
-      `Job ${job.name} run ${event.runId} completed: ${status} (${durationMs}ms)`,
-    );
+    this.logger.warn(`Job ${job.name} has no workflow, run ${event.runId} failed`);
   }
 
   private async delegateToWorkflow(

@@ -10,11 +10,6 @@ export const createJobSchema = z.object({
   description: z.string().optional(),
   schedule: z.string().min(1),
   timezone: z.string().max(100).default('UTC'),
-  url: z.string().url(),
-  method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).default('POST'),
-  headers: z.record(z.string()).default({}),
-  body: z.string().optional(),
-  timeoutSeconds: z.number().int().positive().max(300).default(30),
   // Retry policy
   maxRetries: z.number().int().min(0).max(10).default(0),
   retryDelaySeconds: z.number().int().positive().default(60),
@@ -23,7 +18,6 @@ export const createJobSchema = z.object({
   // Concurrency control
   concurrencyLimit: z.number().int().positive().default(1),
   concurrencyPolicy: z.enum(['queue', 'skip', 'cancel']).default('queue'),
-  successStatusCodes: z.array(z.number().int().positive()).default([200, 201, 202, 204]),
   monitorId: z.string().uuid().optional(),
   teamId: z.string().uuid().optional(),
   tags: z.array(z.string()).default([]),

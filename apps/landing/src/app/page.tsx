@@ -74,14 +74,20 @@ export default function LandingPage() {
           </span>
           <div className="flex items-center gap-3">
             <LinkBtn
-              href="https://github.com/your-org/kast"
+              href="/docs"
+              className="text-[#8B949E] hover:text-[#E6EDF3] text-xs px-3 py-1.5"
+            >
+              Docs
+            </LinkBtn>
+            <LinkBtn
+              href="https://github.com/elliot736/kast"
               target="_blank"
               className="text-[#8B949E] hover:text-[#E6EDF3] text-xs px-3 py-1.5"
             >
               GitHub &#8599;
             </LinkBtn>
             <LinkBtn
-              href="/signup"
+              href="/docs/quickstart"
               className="border border-[#00E5C3] text-[#00E5C3] hover:bg-[#00E5C3]/10 text-xs px-4 py-1.5"
             >
               Get Started
@@ -129,14 +135,14 @@ export default function LandingPage() {
 
             <motion.div variants={fadeUp} className="flex gap-3 pt-2">
               <LinkBtn
-                href="/signup"
+                href="/docs/quickstart"
                 className="border border-[#00E5C3] text-[#00E5C3] hover:bg-[#00E5C3]/10 text-sm px-6 py-2.5"
               >
                 Self-host in 5 minutes
                 <ArrowRight className="ml-2 w-4 h-4" />
               </LinkBtn>
               <LinkBtn
-                href="https://github.com/your-org/kast"
+                href="https://github.com/elliot736/kast"
                 target="_blank"
                 className="text-[#8B949E] hover:text-[#E6EDF3] text-sm px-4 py-2.5"
               >
@@ -404,14 +410,14 @@ export default function LandingPage() {
           </p>
           <div className="flex justify-center gap-3">
             <LinkBtn
-              href="/signup"
+              href="/docs/quickstart"
               className="border border-[#00E5C3] bg-[#00E5C3] text-[#080B0F] hover:bg-[#00E5C3]/90 text-sm px-8 py-2.5 font-bold"
             >
               Get Started
               <ArrowRight className="ml-2 w-4 h-4" />
             </LinkBtn>
             <LinkBtn
-              href="https://github.com/your-org/kast"
+              href="https://github.com/elliot736/kast"
               target="_blank"
               className="text-[#8B949E] hover:text-[#E6EDF3] text-sm px-4 py-2.5"
             >
@@ -434,9 +440,11 @@ export default function LandingPage() {
           >
             KAST
           </span>
-          <span className="text-xs text-[#8B949E]/50">
-            Every job watched. Every event replayable.
-          </span>
+          <div className="flex items-center gap-4 text-xs text-[#8B949E]/50">
+            <a href="/docs" className="hover:text-[#8B949E] transition-colors">Docs</a>
+            <a href="https://github.com/elliot736/kast" target="_blank" rel="noopener noreferrer" className="hover:text-[#8B949E] transition-colors">GitHub</a>
+            <span>MIT License</span>
+          </div>
         </div>
       </footer>
     </div>

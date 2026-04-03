@@ -10,7 +10,6 @@ import {
   Zap,
   Moon,
   GitFork,
-  Pause,
   type LucideIcon,
 } from "lucide-react";
 import { useState, useEffect } from "react";

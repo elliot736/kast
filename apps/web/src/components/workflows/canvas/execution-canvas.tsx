@@ -103,6 +103,7 @@ export function ExecutionCanvas({
           sourceHandle: edge.sourceHandle ?? "default",
           target: edge.target,
           targetHandle: "input",
+          type: "smoothstep",
           animated: !!sourceCompleted,
           label: edge.label ?? (isConditionEdge ? edge.sourceHandle : undefined) ?? (isLoop ? "loop" : undefined),
           style: { stroke, strokeWidth, strokeDasharray },

@@ -27,7 +27,8 @@ import type {
   WorkflowStepResult,
   NodeType,
 } from "@/lib/api";
-import { Save } from "lucide-react";
+import { Save, LayoutGrid } from "lucide-react";
+import { autoLayout, needsLayout } from "./auto-layout";
 
 import { BaseNode, type StepNodeData, type StepExecutionStatus } from "./nodes/base-node";
 import { ConditionNode, type ConditionNodeData } from "./nodes/condition-node";
@@ -173,7 +174,7 @@ function graphToFlowEdges(
         sourceHandle: edge.sourceHandle ?? "default",
         target: edge.target,
         targetHandle: "input",
-        type: "default",
+        type: "smoothstep",
         animated,
         label,
         style: { stroke, strokeWidth, strokeDasharray },
@@ -203,7 +204,9 @@ function WorkflowCanvasInner({
 }) {
   const { screenToFlowPosition } = useReactFlow();
 
-  const [graphNodes, setGraphNodes] = useState<WorkflowNodeDefinition[]>(initialNodes);
+  const [graphNodes, setGraphNodes] = useState<WorkflowNodeDefinition[]>(
+    needsLayout(initialNodes) ? autoLayout(initialNodes, initialEdges) : initialNodes,
+  );
   const [graphEdges, setGraphEdges] = useState<WorkflowEdgeDefinition[]>(initialEdges);
   const graphEdgesRef = useRef(graphEdges);
   graphEdgesRef.current = graphEdges;
@@ -287,12 +290,13 @@ function WorkflowCanvasInner({
 
   const [rfNodes, setRfNodes] = useState<Node[]>(flowNodes);
   const [rfEdges, setRfEdges] = useState<Edge[]>(flowEdges);
+  const [layoutVersion, setLayoutVersion] = useState(0);
 
   const graphKey = `${graphNodes.map((n) => n.id).join(",")}|${graphEdges.map((e) => e.id).join(",")}`;
   const execKey = execution
     ? `${execution.workflowStatus}-${execution.stepResults.length}-${execution.currentStepId}`
     : "none";
-  const syncKey = `${graphKey}|${execKey}`;
+  const syncKey = `${graphKey}|${execKey}|${layoutVersion}`;
   const [prevSyncKey, setPrevSyncKey] = useState(syncKey);
   if (syncKey !== prevSyncKey) {
     setPrevSyncKey(syncKey);
@@ -381,6 +385,11 @@ function WorkflowCanvasInner({
     setGraphEdges((prev) => prev.filter((e) => !ids.has(e.id)));
   }, []);
 
+  const handleAutoLayout = useCallback(() => {
+    setGraphNodes((prev) => autoLayout(prev, graphEdgesRef.current));
+    setLayoutVersion((v) => v + 1); // force re-sync
+  }, []);
+
   const selectedNode = selectedNodeId ? graphNodes.find((n) => n.id === selectedNodeId) ?? null : null;
 
   const handleSave = useCallback(() => {
@@ -413,7 +422,7 @@ function WorkflowCanvasInner({
         proOptions={{ hideAttribution: true }}
         className="bg-background"
         defaultEdgeOptions={{
-          type: "default",
+          type: "smoothstep",
           style: { stroke: "var(--color-muted-foreground)", strokeWidth: 1.5 },
         }}
       >
@@ -438,6 +447,10 @@ function WorkflowCanvasInner({
       )}
 
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-lg border bg-card p-2 shadow-lg">
+        <Button size="sm" variant="outline" onClick={handleAutoLayout}>
+          <LayoutGrid className="size-3.5" />
+          Layout
+        </Button>
         <Button size="sm" onClick={handleSave} disabled={saving}>
           <Save className="size-3.5" />
           {saving ? "Saving..." : "Save Workflow"}

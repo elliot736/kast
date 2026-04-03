@@ -1,0 +1,27 @@
+# Copy this to terraform.tfvars and fill in the values
+
+aws_region  = "us-east-1"
+environment = "production"
+
+# Database
+db_password = "CHANGE_ME_strong_password_here"
+
+# Auth
+better_auth_secret = "CHANGE_ME_at_least_32_characters_long"
+
+# Domain (optional — leave empty to use the ALB DNS name directly)
+domain_name     = ""
+certificate_arn = ""
+
+# ECS sizing (defaults are fine for getting started)
+# api_cpu           = 1024
+# api_memory        = 2048
+# api_desired_count = 2
+# web_cpu           = 512
+# web_memory        = 1024
+# web_desired_count = 2
+
+# MSK sizing
+# msk_instance_type   = "kafka.t3.small"
+# msk_broker_count    = 2
+# msk_ebs_volume_size = 50

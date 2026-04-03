@@ -14,7 +14,7 @@ const jetbrains = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Kast — Event-driven job monitoring",
+  title: "Kast | Event-driven job monitoring",
   description:
     "Open-source, self-hosted monitoring for cron jobs, pipelines, and background tasks. Built on event streaming.",
 };

@@ -7,12 +7,12 @@ const timelineEvents = [
   { time: "03:00:00", label: "db-backup expected", type: "expected" },
   { time: "03:00:00", label: "No ping received", type: "miss" },
   { time: "03:05:00", label: "Grace period expired", type: "alert" },
-  { time: "03:05:01", label: "Incident opened — missed_ping", type: "incident" },
+  { time: "03:05:01", label: "Incident opened: missed_ping", type: "incident" },
   { time: "03:05:02", label: "Slack alert dispatched", type: "notify" },
   { time: "03:05:02", label: "PagerDuty alert triggered", type: "notify" },
   { time: "03:12:45", label: "Manual restart initiated", type: "action" },
   { time: "03:14:22", label: "db-backup ping: success (4.2s)", type: "resolve" },
-  { time: "03:14:22", label: "Incident resolved — 14m 22s downtime", type: "resolve" },
+  { time: "03:14:22", label: "Incident resolved, 14m 22s downtime", type: "resolve" },
 ];
 
 const typeColors: Record<string, string> = {
@@ -34,7 +34,7 @@ export function IncidentReplay() {
       <Tabs defaultValue="replay" className="w-full">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#1C2128] bg-[#080B0F]">
           <span className="text-[11px] font-mono text-[#8B949E]">
-            incident #a3f8 — db-backup
+            incident #a3f8 / db-backup
           </span>
           <TabsList className="bg-transparent border border-[#1C2128] rounded-none h-7 p-0">
             <TabsTrigger

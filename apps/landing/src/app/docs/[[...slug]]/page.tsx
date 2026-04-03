@@ -39,7 +39,7 @@ export async function generateMetadata(props: {
   const page = source.getPage(params.slug);
   if (!page) notFound();
   return {
-    title: `${page.data.title} — Kast Docs`,
+    title: `${page.data.title} | Kast Docs`,
     description: page.data.description,
   };
 }

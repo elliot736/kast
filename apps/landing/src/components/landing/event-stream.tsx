@@ -14,7 +14,7 @@ const events = [
   { time: "14:23:38", job: "email-digest", status: "ok", duration: "3.4s" },
   { time: "14:23:41", job: "analytics-etl", status: "ok", duration: "15.2s" },
   { time: "14:23:45", job: "cert-renewal", status: "ok", duration: "0.4s" },
-  { time: "14:23:49", job: "invoice-sync", status: "fail", duration: "—" },
+  { time: "14:23:49", job: "invoice-sync", status: "fail", duration: "n/a" },
   { time: "14:23:52", job: "thumbnail-gen", status: "ok", duration: "0.2s" },
   { time: "14:23:56", job: "daily-report", status: "ok", duration: "9.1s" },
   { time: "14:24:01", job: "db-vacuum", status: "ok", duration: "22.3s" },
@@ -61,7 +61,7 @@ export function EventStream() {
           <div className="w-2.5 h-2.5 rounded-full bg-[#00E5C3]/80" />
         </div>
         <span className="text-[11px] font-mono text-[#8B949E] ml-2">
-          kast event stream — live
+          kast event stream / live
         </span>
         <div className="ml-auto flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-[#00E5C3] animate-pulse-alive" />

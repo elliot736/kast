@@ -1,12 +1,12 @@
 ---
 title: Why Event Streaming
-description: How Kast's event-driven architecture gives you incident replay, alert backtesting, real-time dashboards, and instant recovery — and why that matters for your monitoring.
+description: How Kast's event-driven architecture gives you incident replay, alert backtesting, real-time dashboards, and instant recovery, and why that matters for your monitoring.
 ---
 
 
 Most job monitors work like a camera that takes a photo every few minutes. You get snapshots: "monitor X was healthy at 3pm. Down at 3:05pm. Healthy again at 3:20pm." If you want to understand what happened between those snapshots, you are guessing from timestamps.
 
-Kast works like a video camera. It records every event as it happens, in order, and keeps the full tape. This is not an implementation detail you can ignore — it directly changes what you can do when something goes wrong.
+Kast works like a video camera. It records every event as it happens, in order, and keeps the full tape. This is not an implementation detail you can ignore. It directly changes what you can do when something goes wrong.
 
 ## Everything Is an Event
 
@@ -22,7 +22,7 @@ Every action in Kast produces a durable, ordered event:
 
 These events are stored in an ordered log (powered by Redpanda, a Kafka-compatible streaming platform). Each event has a timestamp, a sequence number, and all the data about what happened.
 
-Compare this to a typical monitoring tool that stores rows in a database: "monitor X, status healthy, updated_at 3:00am." When the status changes to "down," the previous row is overwritten or a new row is inserted. You know the current state, but the intermediate events — the exact moment the grace period expired, the exact moment the alert was dispatched, whether delivery failed and was retried — are lost or scattered across different tables.
+Compare this to a typical monitoring tool that stores rows in a database: "monitor X, status healthy, updated_at 3:00am." When the status changes to "down," the previous row is overwritten or a new row is inserted. You know the current state, but the intermediate events (the exact moment the grace period expired, the exact moment the alert was dispatched, whether delivery failed and was retried) are lost or scattered across different tables.
 
 In Kast, nothing is overwritten. Events are appended to an immutable log. The database is a derived view built from that log. If the database disappeared tomorrow, you could rebuild it by replaying events from the beginning.
 
@@ -48,16 +48,16 @@ Kast seeks to that position in the event log and replays the full sequence.
 
 Not a summary. The actual events, in order:
 
-- 03:00:00 — `PingExpected` for `db-backup`
-- 03:05:00 — `GracePeriodExpired`, no ping received
-- 03:05:01 — `MonitorStateChanged` from `healthy` to `down`
-- 03:05:01 — `IncidentOpened`, reason: missed ping
-- 03:05:02 — `AlertDispatched` to Slack `#ops-alerts`
-- 03:05:03 — `AlertDelivered` successfully
-- 03:18:44 — `IncidentAcknowledged` by omar@example.com
-- 03:35:12 — `PingReceived` type: success
-- 03:35:12 — `MonitorStateChanged` from `down` to `healthy`
-- 03:35:12 — `IncidentResolved`, downtime: 35m 12s
+- 03:00:00: `PingExpected` for `db-backup`
+- 03:05:00: `GracePeriodExpired`, no ping received
+- 03:05:01: `MonitorStateChanged` from `healthy` to `down`
+- 03:05:01: `IncidentOpened`, reason: missed ping
+- 03:05:02: `AlertDispatched` to Slack `#ops-alerts`
+- 03:05:03: `AlertDelivered` successfully
+- 03:18:44: `IncidentAcknowledged` by omar@example.com
+- 03:35:12: `PingReceived` type: success
+- 03:35:12: `MonitorStateChanged` from `down` to `healthy`
+- 03:35:12: `IncidentResolved`, downtime: 35m 12s
 </Step>
 
 <Step>
@@ -73,11 +73,11 @@ You changed the grace period from 5 minutes to 10 minutes. Would last week's 3am
 
 With a snapshot-based monitor, you would have to wait for the next incident to find out. With Kast, you replay the events through the new rules:
 
-> The ping was expected at 03:00. With a 10-minute grace period, the deadline would have been 03:10. The job recovered at 03:35, so yes — the alert would still have fired, but 5 minutes later.
+> The ping was expected at 03:00. With a 10-minute grace period, the deadline would have been 03:10. The job recovered at 03:35, so yes, the alert would still have fired, but 5 minutes later.
 
 Now try the opposite: you're getting too many alerts and want to increase the grace period to 30 minutes. Replay last month's events:
 
-> Out of 4 incidents, 3 would have auto-resolved within 30 minutes (the job was just slow). Only 1 would have triggered an alert — the actual outage. False alerts reduced by 75%.
+> Out of 4 incidents, 3 would have auto-resolved within 30 minutes (the job was just slow). Only 1 would have triggered an alert: the actual outage. False alerts reduced by 75%.
 
 You can make this decision with data instead of guessing.
 
@@ -92,12 +92,12 @@ One property of the event log that matters in practice: events are ordered. When
 This ordering is guaranteed by Redpanda's partition-level ordering. All events for a single monitor go to the same partition, so the sequence within a monitor is always correct. You will never see a timeline where the resolution appears before the detection.
 
 <Callout type="info">
-Ordering matters most during postmortems. When someone asks "did the alert fire before or after the deploy?", the event log gives you a definitive answer — not an approximation based on timestamps that might have clock skew.
+Ordering matters most during postmortems. When someone asks "did the alert fire before or after the deploy?", the event log gives you a definitive answer, not an approximation based on timestamps that might have clock skew.
 </Callout>
 
 ## Zero-Poll Dashboard
 
-In most monitoring tools, the dashboard polls the API every 15-30 seconds. You are always looking at stale data. "Is this current? Let me refresh." You click refresh. Nothing changes. You click again. Still nothing. Then suddenly it updates — 20 seconds after the actual event.
+In most monitoring tools, the dashboard polls the API every 15-30 seconds. You are always looking at stale data. "Is this current? Let me refresh." You click refresh. Nothing changes. You click again. Still nothing. Then suddenly it updates, 20 seconds after the actual event.
 
 Kast's dashboard doesn't poll. Events flow directly from the event log to your browser over WebSockets:
 
@@ -111,7 +111,7 @@ This matters at 3am when you are staring at the dashboard trying to figure out i
 
 ## Instant Recovery
 
-When Kast restarts — whether from a deploy, a crash, or a server reboot — it needs to know the current state of every monitor. Is `db-backup` healthy or down? Is there an open incident? When is the next expected ping?
+When Kast restarts (whether from a deploy, a crash, or a server reboot) it needs to know the current state of every monitor. Is `db-backup` healthy or down? Is there an open incident? When is the next expected ping?
 
 Snapshot-based systems query the database and hope the data is current. Kast reads the compacted `monitor-state` topic from Redpanda. This topic contains the latest state for every monitor, and Kast can read the entire thing in seconds.
 
@@ -141,10 +141,10 @@ Here's the practical impact:
 
 Events live in two places:
 
-- **Redpanda stream** — 7 days of retention. This is the hot path: real-time consumers, WebSocket streaming, replay, and backtesting all read from here. The stream is fast and ordered.
-- **PostgreSQL** — Permanent storage. The sink consumer writes every event to the database in batches. This is the cold path: dashboard queries, historical reports, and long-term auditing read from here.
+- **Redpanda stream.** 7 days of retention. This is the hot path: real-time consumers, WebSocket streaming, replay, and backtesting all read from here. The stream is fast and ordered.
+- **PostgreSQL.** Permanent storage. The sink consumer writes every event to the database in batches. This is the cold path: dashboard queries, historical reports, and long-term auditing read from here.
 
-The 7-day stream retention means you can replay and backtest any incident from the past week directly from the stream. For older incidents, the data lives in PostgreSQL and is available through the dashboard — you just can't stream through it at the same speed.
+The 7-day stream retention means you can replay and backtest any incident from the past week directly from the stream. For older incidents, the data lives in PostgreSQL and is available through the dashboard, though you can't stream through it at the same speed.
 
 For most teams, this is the right tradeoff. The incidents you need to replay urgently are the ones that just happened. By the time something is a month old, you're looking at it in a postmortem document, not streaming through it in real-time.
 

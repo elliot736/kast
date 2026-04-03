@@ -244,6 +244,31 @@ kast/
 └── turbo.json
 ```
 
+## AWS Deployment
+
+Kast includes a production-ready Terraform configuration in [`terraform/`](./terraform) that deploys to AWS.
+
+![AWS Deployment Architecture](apps/landing/public/diagrams/aws-deployment.png)
+
+| Component | AWS Service |
+|-----------|------------|
+| Reverse proxy | Application Load Balancer |
+| API + Dashboard | ECS Fargate (auto-scaling) |
+| Database | Aurora PostgreSQL 17 Serverless v2 |
+| Event streaming | Amazon MSK (Kafka 3.7) |
+| Secrets | AWS Secrets Manager |
+| Images | Amazon ECR |
+| Logging | CloudWatch |
+
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+# Set db_password, better_auth_secret, and optionally domain_name + certificate_arn
+terraform init && terraform plan && terraform apply
+```
+
+See [Self-Hosting docs](https://kast.dev/docs/self-hosting) for full deployment instructions including Docker image push and service update commands.
+
 ## Development
 
 ```bash

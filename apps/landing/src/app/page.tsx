@@ -36,7 +36,7 @@ const fadeUp = {
   show: { opacity: 1, y: 0, transition: { duration: 0.5 } },
 };
 
-// Styled link helpers — replaces Button asChild
+// Styled link helpers (replaces Button asChild)
 function LinkBtn({
   href,
   children,

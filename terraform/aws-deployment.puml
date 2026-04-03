@@ -1,0 +1,98 @@
+@startuml aws-deployment
+!theme plain
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Segoe UI"
+skinparam defaultFontSize 12
+skinparam shadowing false
+skinparam roundCorner 8
+skinparam componentStyle rectangle
+skinparam rectangleBorderColor #334155
+skinparam rectangleBackgroundColor #F8FAFC
+skinparam cloudBorderColor #334155
+skinparam cloudBackgroundColor #F1F5F9
+skinparam databaseBorderColor #334155
+skinparam databaseBackgroundColor #F1F5F9
+skinparam noteBorderColor #94A3B8
+skinparam noteBackgroundColor #FFF7ED
+skinparam arrowColor #475569
+skinparam arrowThickness 1.5
+
+title <b>Kast — AWS Deployment Architecture</b>
+
+' ===== External =====
+actor "Users /\nCron Jobs" as users #E2E8F0
+actor "Alert\nWebhooks" as alerts #E2E8F0
+
+cloud "Internet" as internet {
+}
+
+' ===== AWS Region =====
+rectangle "AWS Region (us-east-1)" as region #FFFFFF {
+
+  ' ----- Public Subnets -----
+  rectangle "Public Subnets" as public_subnets #EFF6FF {
+    rectangle "**Application Load Balancer**\n(ALB)" as alb #DBEAFE {
+      rectangle "Listener :443 (HTTPS)" as https_listener #BFDBFE
+      rectangle "Listener :80 → redirect" as http_listener #BFDBFE
+    }
+
+    rectangle "NAT Gateway" as nat #DBEAFE
+    rectangle "Internet Gateway" as igw #DBEAFE
+  }
+
+  ' ----- Private Subnets -----
+  rectangle "Private Subnets" as private_subnets #F0FDF4 {
+
+    ' ECS Cluster
+    rectangle "**ECS Fargate Cluster**" as ecs #DCFCE7 {
+      rectangle "API Service\n<size:10>NestJS · Port 3001\nAuto-scaling 2–6 tasks</size>" as api_svc #BBF7D0
+      rectangle "Web Service\n<size:10>Next.js · Port 3000\nAuto-scaling 2–4 tasks</size>" as web_svc #BBF7D0
+    }
+
+    ' Data Tier
+    rectangle "**Data Tier**" as data #FEF3C7 {
+      database "Aurora PostgreSQL 17\n<size:10>Serverless v2\n0.5–4 ACU</size>" as rds #FDE68A
+      rectangle "Amazon MSK\n<size:10>Kafka 3.7 (KRaft)\n2 brokers · IAM auth</size>" as msk #FDE68A
+    }
+  }
+
+  ' ----- Supporting Services -----
+  rectangle "Supporting Services" as support #FDF2F8 {
+    rectangle "ECR\n<size:10>kast/api\nkast/web</size>" as ecr #FBCFE8
+    rectangle "Secrets Manager\n<size:10>DB password\nAuth secret</size>" as secrets #FBCFE8
+    rectangle "CloudWatch\n<size:10>API logs\nWeb logs\nMSK logs</size>" as cw #FBCFE8
+  }
+}
+
+' ===== Connections =====
+users --> internet
+internet --> igw
+igw --> alb
+
+https_listener --> api_svc : <size:10>/api/* /ping/*\n/socket.io/*
+https_listener --> web_svc : <size:10>/* (default)
+
+api_svc --> rds : <size:10>Drizzle ORM
+api_svc --> msk : <size:10>KafkaJS\n(produce/consume)
+api_svc --> alerts : <size:10>Slack, Discord\nPagerDuty, etc.
+
+api_svc ..> cw : <size:10>logs
+web_svc ..> cw : <size:10>logs
+msk ..> cw : <size:10>broker logs
+
+ecs ..> ecr : <size:10>pull images
+ecs ..> secrets : <size:10>inject at runtime
+
+api_svc --> nat : <size:10>outbound
+nat --> igw
+
+' ===== Legend =====
+legend right
+  |= Color |= Layer |
+  | <#DBEAFE> | Public / Networking |
+  | <#DCFCE7> | Compute (ECS Fargate) |
+  | <#FEF3C7> | Data (Aurora + MSK) |
+  | <#FDF2F8> | Supporting Services |
+endlegend
+
+@enduml

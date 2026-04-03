@@ -1,0 +1,191 @@
+---
+title: Introduction
+description: Kast is an open-source, event-stream-native monitoring platform for cron jobs, scheduled tasks, and background workers built on Redpanda and PostgreSQL.
+---
+
+
+Kast is an open-source, self-hosted monitoring platform for cron jobs, scheduled tasks, background workers, and data pipelines. Your jobs send heartbeat pings over HTTP. If a ping arrives late, exceeds its maximum runtime, or explicitly reports a failure, Kast opens an incident and alerts you through any combination of six channels.
+
+## Why Kast Exists
+
+Cron jobs fail silently. A backup script stops running, an ETL pipeline hangs, a queue worker crashes at 3 AM -- and nobody notices until a customer reports missing data or a database runs out of space. The job ran for months without issue, so nobody thought to check.
+
+Existing solutions are either expensive SaaS products with per-monitor pricing that punishes scale, or aging open-source tools built on polling and relational databases that struggle with high-throughput event streams. None of them give you an event log you can replay, seek, or backtest against.
+
+Kast takes a different approach. Every ping, state change, incident, and alert is a durable event in a Redpanda distributed log. PostgreSQL stores derived projections for fast queries, but Redpanda is the source of truth. This makes the entire system auditable, replayable, and extensible without modifying existing code.
+
+## How It Works
+
+<Steps>
+<Step>
+### Ping
+
+Your job sends an HTTP request to Kast when it starts, succeeds, fails, or wants to log a message. One curl command. No SDK required.
+</Step>
+
+<Step>
+### Evaluate
+
+Kast checks the ping against the monitor's schedule. If a ping is late, missing, or reports failure, Kast transitions the monitor's state and opens an incident.
+</Step>
+
+<Step>
+### Alert
+
+Open incidents trigger alert delivery to your configured channels -- Slack, Discord, email, webhooks, PagerDuty, or Telegram -- with cooldowns, thresholds, and automatic retry.
+</Step>
+</Steps>
+
+## System Architecture
+
+<ImageZoom src="/diagrams/architecture.png" width={1433} height={633} alt="Kast system architecture showing NestJS modules, Redpanda topics, PostgreSQL, and alert channels" />
+
+The architecture is a pipeline of NestJS modules connected through Redpanda topics. A ping enters via HTTP, flows through schedule evaluation, incident management, and alert dispatch -- each stage producing and consuming durable events. The dashboard receives real-time updates over WebSocket, and PostgreSQL serves as a queryable projection of the event log.
+
+### Key Components
+
+| Component | Role |
+|-----------|------|
+| **Ping Controller** | HTTP ingestion endpoint. Validates and publishes ping events to Redpanda. |
+| **Schedule Service** | Evaluates pings against cron/interval schedules. Runs a 60-second sweep for missed pings. |
+| **Incident Service** | Opens, escalates, and resolves incidents based on state transitions. |
+| **Notify Service** | Dispatches alerts to 6 channels with retry and dead letter fallback. |
+| **Job Scheduler** | Triggers due jobs on cron schedule. Creates runs and publishes trigger events. |
+| **Job Executor** | Executes HTTP calls, handles retries and concurrency, delegates to workflow engine. |
+| **Workflow Engine** | Replay-based durable executor for multi-step workflows with sleep, events, and fan-out. |
+| **Sink Module** | Projects events from Redpanda to PostgreSQL in batches. |
+| **WebSocket Gateway** | Pushes real-time events to dashboard clients via Socket.IO. |
+| **Dashboard** | Next.js frontend with monitor management, job execution, workflows, and live event stream. |
+
+## Key Differentiators
+
+| Differentiator | Description |
+|---------------|-------------|
+| **Event-stream native** | Built on Redpanda (Kafka-compatible). Every event is durable, ordered, and replayable. Not bolted on -- the event log is the architecture. |
+| **Replay and backtest** | Seek to any timestamp in the event log and stream events forward via SSE. Replay an incident to understand what happened. Backtest new alert rules against historical data. |
+| **Zero-poll dashboard** | The dashboard receives updates over WebSocket. No polling database queries. State changes appear in milliseconds. |
+| **Self-hosted** | Your infrastructure, your data. Docker Compose deployment with nginx reverse proxy. No telemetry, no phone-home, no vendor lock-in. |
+| **MIT license** | Fully open source. Use it, modify it, deploy it anywhere. |
+
+## Feature Overview
+
+| Feature | Description | Docs |
+|---------|-------------|------|
+| **Ping protocol** | 5 HTTP endpoints for start, success, fail, log, and default pings with body capture | [Ping Protocol](/docs/ping-protocol) |
+| **Cron and interval scheduling** | 5-field cron expressions or fixed-interval monitoring with configurable grace periods | [Scheduling](/docs/scheduling) |
+| **6 alert channels** | Slack, Discord, email, webhooks, PagerDuty, and Telegram with per-monitor routing and cooldowns | [Alert Channels](/docs/alerts) |
+| **Incident replay** | Seek to any timestamp and stream events forward via SSE | [Incident Replay](/docs/incident-replay) |
+| **Dead letter queue** | Failed alerts retry with exponential backoff and land in a dead letter queue for inspection | [Dead Letters](/docs/dead-letters) |
+| **Public status pages** | Team-based status pages showing per-monitor uptime bars and active incidents | [Status Pages](/docs/status-pages) |
+| **CLI with `kast wrap`** | Wrap any shell command with automatic start/success/fail pings and stdout/stderr capture | [CLI Reference](/docs/cli) |
+| **Job execution** | Trigger HTTP endpoints on cron schedules with retries, concurrency control, and structured logging | [Job Execution](/docs/jobs) |
+| **Durable workflows** | Multi-step pipelines with sleep, event waiting, fan-out, and replay-based memoization | [Workflows](/docs/workflows) |
+| **Duration tracking** | Send start and success pings to measure job runtime. Alert if a job exceeds its max runtime. | [Ping Protocol](/docs/ping-protocol) |
+| **Real-time streaming** | WebSocket gateway pushes events to the dashboard and external clients via Socket.IO | [Real-Time Streaming](/docs/realtime) |
+| **Dashboard** | Monitor management, job management, incident investigation, onboarding wizard, and live event stream | [Dashboard](/docs/dashboard) |
+| **Dual authentication** | API keys for programmatic access, session cookies for the dashboard | [Authentication](/docs/authentication) |
+| **Prometheus metrics** | 4 custom metrics plus Node.js runtime metrics at /metrics | [Observability](/docs/observability) |
+| **Event sourcing** | 7 Redpanda topics, 9 consumer groups, log compaction for instant recovery | [Event Architecture](/docs/event-architecture) |
+
+## Tech Stack
+
+| Technology | Role |
+|-----------|------|
+| **NestJS** | API framework. Modular architecture with dependency injection, guards, decorators. |
+| **Redpanda** | Kafka-compatible event streaming. 7 topics, log compaction, consumer groups. Source of truth. |
+| **PostgreSQL** | Relational storage for queryable projections. Drizzle ORM for schema and queries. |
+| **Drizzle ORM** | Type-safe SQL schema definition, migrations, and query builder. |
+| **Next.js** | Dashboard frontend. Server components, app router, API routes. |
+| **shadcn/ui** | UI component library. Tailwind CSS-based, accessible, composable. |
+| **Socket.IO** | WebSocket transport for real-time event streaming to the dashboard. |
+| **Recharts** | Charting library for duration and uptime visualizations. |
+| **better-auth** | Authentication library. Email + password provider, session cookies. |
+| **Pino** | Structured JSON logging. |
+| **prom-client** | Prometheus metrics client for Node.js. |
+
+## Who Is Kast For
+
+- **Engineering teams** running production cron jobs, ETL pipelines, and background workers that must not fail silently.
+- **DevOps and SRE teams** that need an event-sourced audit trail for every scheduled task with replay capability.
+- **Solo developers** who want a lightweight, self-hosted alternative to commercial cron monitoring services.
+
+## Quick Links
+
+### Getting Started
+
+<Cards>
+<Card title="Quickstart" href="/docs/quickstart">
+Running in 5 minutes with Docker Compose
+</Card>
+<Card title="Self-Hosting" href="/docs/self-hosting">
+Production deployment, environment variables, backups
+</Card>
+<Card title="Authentication" href="/docs/authentication">
+API keys, session cookies, bootstrapping
+</Card>
+<Card title="Your First Monitor" href="/docs/first-monitor">
+Create a monitor, understand grace periods and state transitions
+</Card>
+</Cards>
+
+### Core Concepts
+
+<Cards>
+<Card title="Ping Protocol" href="/docs/ping-protocol">
+All 5 endpoints, code examples in 6 languages
+</Card>
+<Card title="Event Architecture" href="/docs/event-architecture">
+All 7 Redpanda topics, consumer groups, event sourcing design
+</Card>
+<Card title="Scheduling" href="/docs/scheduling">
+Cron parsing, sweep cycle, state machine
+</Card>
+<Card title="Real-Time Streaming" href="/docs/realtime">
+WebSocket gateway, Socket.IO, live event feed
+</Card>
+</Cards>
+
+### Job Execution
+
+<Cards>
+<Card title="Job Execution" href="/docs/jobs">
+HTTP cron triggers with retries, concurrency, and structured logs
+</Card>
+<Card title="Workflows" href="/docs/workflows">
+Multi-step pipelines with sleep, events, fan-out, and memoization
+</Card>
+</Cards>
+
+### Features
+
+<Cards>
+<Card title="Alert Channels" href="/docs/alerts">
+Slack, Discord, email, webhooks, PagerDuty, Telegram setup
+</Card>
+<Card title="Dead Letters" href="/docs/dead-letters">
+Failed alert inspection and one-click retry
+</Card>
+<Card title="Incident Replay" href="/docs/incident-replay">
+Seek to any timestamp, stream events via SSE
+</Card>
+<Card title="Status Pages" href="/docs/status-pages">
+Public team status pages
+</Card>
+<Card title="Dashboard" href="/docs/dashboard">
+Monitor management, job management, incident investigation, onboarding
+</Card>
+<Card title="Observability" href="/docs/observability">
+Prometheus metrics, structured logging, health endpoints
+</Card>
+<Card title="CLI Reference" href="/docs/cli">
+kast wrap and all commands
+</Card>
+</Cards>
+
+### Reference
+
+<Cards>
+<Card title="API Reference" href="/docs/api-reference">
+Full REST API with all endpoints
+</Card>
+</Cards>

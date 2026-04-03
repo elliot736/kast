@@ -1,0 +1,258 @@
+---
+title: How Kast Works
+description: Understand the dead man's switch concept, the ping protocol, monitor states, and what happens when your cron jobs fail silently.
+---
+
+
+## The Problem
+
+Cron jobs fail silently. That is their defining trait.
+
+Your database backup stopped running 3 days ago. Nobody noticed until someone needed to restore from it. Your billing pipeline skipped 500 invoices at 3am and finance found out at month-end. Your email digest job has been throwing errors for a week, but it runs in the background, so nobody checked.
+
+These jobs don't have users sitting in front of them. They don't have health endpoints. They run on a schedule, in the background, and they either work or they don't. When they stop working, nothing happens — that is the problem.
+
+You could write a wrapper script that checks exit codes and sends emails. You could set up Prometheus and write alerting rules. You could build a dashboard. But now you are maintaining monitoring infrastructure instead of fixing the job that broke.
+
+Kast exists so you don't have to do any of that. Add one line to your script, and Kast watches it for you.
+
+## The Dead Man's Switch
+
+A dead man's switch is a mechanism that activates when its operator becomes incapacitated. Train conductors hold a lever that must be pressed every 30 seconds. If the conductor lets go — falls asleep, has a medical emergency, leaves the cab — the train automatically brakes.
+
+The key insight: the switch doesn't monitor the conductor. The conductor checks in with the switch. If check-ins stop, something is wrong.
+
+Kast works the same way. Instead of Kast reaching into your servers and checking whether jobs ran (pull), your jobs check in with Kast when they run (push). If they stop checking in, Kast knows something is wrong and alerts you.
+
+<Callout type="info">
+This is the fundamental design: your jobs prove they are alive. Silence means failure.
+</Callout>
+
+## How Kast Fits In
+
+<ImageZoom src="/diagrams/architecture.png" width={1433} height={633} alt="High-level architecture showing your jobs pinging Kast, which evaluates schedules, manages incidents, and dispatches alerts" />
+
+Your jobs run wherever they run — crontab, Kubernetes, Airflow, a Lambda function, a script on your laptop. Kast doesn't care where. It exposes a simple HTTP endpoint. Your job hits that endpoint when it finishes. Kast does the rest: schedule evaluation, state tracking, incident management, and alert dispatch.
+
+There is no agent to install on your servers. No sidecar to deploy. No SDK to import. If your environment can run `curl`, it can use Kast.
+
+## The Core Flow
+
+<Steps>
+<Step>
+### Create a monitor
+
+You tell Kast about your job. "My database backup runs every day at 3am" (a cron expression like `0 3 * * *`) or "my sync job runs every 30 minutes" (an interval). You set a grace period — how long Kast should wait past the expected time before considering the job late.
+</Step>
+
+<Step>
+### Get your ping URL
+
+Kast gives you a unique URL for this monitor:
+
+```
+https://kast.example.com/ping/a1b2c3d4-5678-90ab-cdef-1234567890ab/success
+```
+
+This URL is unauthenticated by design. Anyone with the UUID can ping it, which makes integration trivial — no API keys to rotate, no SDKs to install.
+</Step>
+
+<Step>
+### Add one line to your job
+
+At the end of your script, ping Kast:
+
+```bash
+#!/bin/bash
+pg_dump mydb > /backups/mydb-$(date +%F).sql
+
+curl -s https://kast.example.com/ping/a1b2c3d4/success
+```
+
+That `curl` is the entire integration. Your job now checks in with Kast every time it runs.
+</Step>
+
+<Step>
+### Kast records the ping
+
+Every ping is stored as an event — not just a timestamp, but a durable record in an ordered log. Kast calculates when the next ping should arrive based on your schedule.
+</Step>
+
+<Step>
+### Kast watches for silence
+
+If the next ping doesn't arrive within the expected window plus your grace period, Kast opens an incident and alerts you through your configured channels (Slack, Discord, email, webhook).
+</Step>
+</Steps>
+
+## Schedules and Grace Periods
+
+When you create a monitor, you tell Kast when to expect pings. There are two ways to define a schedule:
+
+**Cron expression** — `0 3 * * *` means "every day at 3am." Kast uses the cron expression to calculate the next expected ping time after each successful ping. This is the right choice for jobs that run on a fixed schedule.
+
+**Interval** — `30m` means "every 30 minutes." Kast calculates the next expected ping as "last ping time + 30 minutes." This is the right choice for jobs that run in a loop (poll a queue every 5 minutes, sync data every hour).
+
+The **grace period** is how long Kast waits after the expected time before considering the job down. If your backup is scheduled for 3:00am and the grace period is 5 minutes, Kast won't alert until 3:05am. This accounts for normal jitter — cron starting a few seconds late, the system being under load, network delays.
+
+<Callout type="warn">
+Set the grace period based on how variable your job's **start time** is, not how long the job takes. If the job always starts within 1 minute of the scheduled time, a 5-minute grace period is generous. If it sometimes starts 10 minutes late due to resource contention, you need a 15-minute grace period.
+</Callout>
+
+## What Kast Evaluates Every 60 Seconds
+
+Kast runs a sweep every 60 seconds. During each sweep, it checks every active monitor and asks three questions:
+
+1. When was the last ping?
+2. When was the next ping expected?
+3. Has the grace period expired?
+
+Based on the answers, each monitor is in one of three states:
+
+### Healthy
+
+The last ping arrived on time. The next expected ping is still in the future, or its grace period hasn't expired yet. Everything is working.
+
+### Late
+
+The expected time has passed, but the grace period hasn't expired yet. Maybe the job is running slow today. Maybe the server is under load and the cron started a minute late. Kast notes this but doesn't alert yet — it gives your job the benefit of the doubt for the duration of the grace period.
+
+### Down
+
+The grace period has expired and no ping arrived. Something is wrong. Kast transitions the monitor to **down**, opens an incident, records the state change as an event, and fires alerts.
+
+<ImageZoom src="/diagrams/states.png" width={772} height={594} alt="Monitor state machine showing transitions between healthy, late, and down states based on ping arrivals and grace period expiry" />
+
+<Callout type="info">
+The grace period is your buffer against false alarms. A 5-minute grace period means your job can run up to 5 minutes late without triggering an alert. Set it based on how variable your job's start time is — not how long the job takes to run.
+</Callout>
+
+## The Ping Protocol
+
+You can use pings at four levels of detail. Start simple and add more as you need it.
+
+### Simple: just `/success`
+
+```bash
+# At the end of your script
+curl -s https://kast.example.com/ping/UUID/success
+```
+
+This is enough for most jobs. Kast knows your job ran and completed. If this ping stops arriving, you get alerted.
+
+### Better: `/start` and `/success`
+
+```bash
+curl -s https://kast.example.com/ping/UUID/start
+
+# ... your actual job ...
+
+curl -s https://kast.example.com/ping/UUID/success
+```
+
+Now Kast tracks two things: that your job started and that it finished. This unlocks **duration tracking** — Kast records how long the job took each run. You can see trends ("backups used to take 10 minutes, now they take 45") and set a **max runtime** alert ("if the job has been running for more than 2 hours, something is stuck").
+
+### On failure: `/fail`
+
+```bash
+if ! pg_dump mydb > /backups/mydb.sql; then
+  curl -s -X POST -d "pg_dump exited with code 1" \
+    https://kast.example.com/ping/UUID/fail
+  exit 1
+fi
+
+curl -s https://kast.example.com/ping/UUID/success
+```
+
+When you ping `/fail`, Kast opens an incident immediately. It doesn't wait for the grace period — you've explicitly told it something went wrong. The request body (up to 10KB) is stored with the event, so you can see the error message in the dashboard.
+
+### Full detail: `/log`
+
+```bash
+curl -s https://kast.example.com/ping/UUID/start
+
+OUTPUT=$(pg_dump mydb 2>&1)
+EXIT_CODE=$?
+
+curl -s -X POST -d "$OUTPUT" \
+  https://kast.example.com/ping/UUID/log
+
+if [ $EXIT_CODE -eq 0 ]; then
+  curl -s https://kast.example.com/ping/UUID/success
+else
+  curl -s -X POST -d "Exit code: $EXIT_CODE" \
+    https://kast.example.com/ping/UUID/fail
+fi
+```
+
+Log pings don't affect monitor state — they just attach output to the current run. When an incident happens, you can read the logs in the dashboard instead of SSH-ing into the server and grepping through files.
+
+<Callout type="info">
+You don't need to use all four endpoints. Most people start with just `/success` and add `/start` or `/fail` later when they want more visibility. The simplest integration is one `curl` at the end of a script.
+</Callout>
+
+## What Happens When Something Goes Wrong
+
+Here is a real scenario, minute by minute.
+
+> **Tuesday, 3:00am** — Your database backup was supposed to run. It didn't. The cron daemon crashed after a package update and nobody noticed. No ping arrives at Kast.
+>
+> **3:01am** — Kast's sweep runs. It checks `db-backup`: last ping was Monday 3:02am (yesterday's successful run). Next expected ping was today at 3:00am. Current time is 3:01am. Grace period is 5 minutes, so the deadline is 3:05am. Status changes from **healthy** to **late**.
+>
+> **3:06am** — Next relevant sweep. Current time is past the 3:05am deadline. No ping has arrived. Status changes from **late** to **down**. Kast opens an incident, records the state transition as an event, and publishes an alert trigger.
+>
+> **3:06am (seconds later)** — The alert pipeline picks up the trigger. It checks your alert configuration: Slack channel `#ops-alerts`, cooldown 30 minutes. No recent alert for this monitor. It sends the message:
+>
+> *"db-backup is down — missed ping. Expected at 03:00, grace period expired at 03:05."*
+>
+> **3:20am** — You see the Slack message, check the Kast dashboard, and see the incident. You acknowledge it (this stops any escalation). You SSH into the server, discover the cron daemon is dead, restart it.
+>
+> **3:25am** — The backup runs (you triggered it manually). At the end, it pings `/success`. Kast receives the ping, transitions the monitor to **healthy**, auto-resolves the incident, and records the downtime: 25 minutes.
+>
+> **Next morning** — Your dashboard shows a gap in the uptime chart for `db-backup` between 3:00am and 3:25am. The incident log shows exactly what happened and when. The downtime is factored into your uptime percentage.
+
+## Duration Tracking and Max Runtime
+
+When you use both `/start` and `/success` pings, Kast tracks how long each run takes. This data is stored with every run event and displayed as a duration chart in the dashboard.
+
+Over time, you build a profile of your job's performance. You can see trends:
+
+- "Backups used to take 12 minutes, but this week they're averaging 45 minutes. The database is growing and we need to optimize."
+- "The sync job normally takes 2 minutes, but on the 1st of the month it takes 20 minutes because of higher transaction volume."
+
+**Max runtime** is a separate safety net. You set it when you create the monitor: "if this job has been running for more than 2 hours, something is stuck." If Kast sees a `/start` ping but no `/success` or `/fail` within the max runtime window, it opens an incident.
+
+This catches a category of failures that missed-ping detection can't: the job started, so Kast knows it's running, but it never finished. The process is hung, deadlocked, or waiting on a resource that will never become available.
+
+## Why Events Matter
+
+Every ping, every state change, every alert dispatch, every retry is stored as an event in a durable, ordered log. This is not just an implementation detail — it changes what you can do after an incident.
+
+**Replay incidents.** "What exactly happened at 3am last Tuesday?" Open the incident, and you see the full timeline: every event in sequence, with timestamps. Not a summary — the actual events.
+
+**Backtest alert rules.** "If I had set the grace period to 10 minutes instead of 5, would this have paged me?" Replay the events through the new rules and find out — without waiting for the next incident to test it.
+
+**Stream to your dashboard in real-time.** Events flow from the log to your browser over WebSockets. The dashboard updates the instant something happens. No polling. No refresh button. No "is this data stale?" anxiety.
+
+**Audit everything.** You can trace exactly why an incident was opened by reading the event sequence. This matters when you are doing a postmortem and someone asks "why did we get paged?"
+
+<Callout type="info">
+Events are retained in the stream for 7 days, then live in PostgreSQL for as long as you need them. You never lose the history of what happened to your jobs.
+</Callout>
+
+## Next Steps
+
+<Cards>
+<Card title="Integration Guide" href="/docs/integration-guide">
+Copy-paste examples for crontab, Kubernetes, Docker, CI/CD, and every major language.
+</Card>
+<Card title="Understanding Incidents" href="/docs/understanding-incidents">
+Learn the full incident lifecycle — from detection to resolution.
+</Card>
+<Card title="Scheduling" href="/docs/scheduling">
+Deep dive into cron expressions, intervals, and grace periods.
+</Card>
+<Card title="Alerts" href="/docs/alerts">
+Configure Slack, Discord, email, and webhook notifications.
+</Card>
+</Cards>

@@ -1,0 +1,333 @@
+---
+title: Self-Hosting
+description: Deploy Kast on your own infrastructure with Docker Compose, configure environment variables, set up TLS, backups, and monitoring.
+---
+
+
+Kast is designed to run on your own infrastructure. This guide covers production deployment with Docker Compose, environment configuration, reverse proxy setup, TLS, backups, and monitoring Kast itself.
+
+## Architecture Overview
+
+<ImageZoom src="/diagrams/architecture.png" width={1433} height={633} alt="Full Kast system architecture showing NestJS modules, Redpanda, PostgreSQL, and alert channels" />
+
+A production Kast deployment consists of four services behind a reverse proxy:
+
+| Service | Role |
+|---------|------|
+| **Redpanda** | Kafka-compatible event streaming broker. Source of truth for all events. |
+| **PostgreSQL** | Relational storage for derived projections, user accounts, and API keys. |
+| **Kast API** | NestJS backend handling ping ingestion, REST API, WebSocket gateway, and all event processing. |
+| **Kast Dashboard** | Next.js frontend for monitor management, incident viewing, and replay. |
+
+## Project Structure
+
+<Files>
+<Folder name="kast" defaultOpen>
+<Folder name="apps" defaultOpen>
+<Folder name="api">
+<File name="src/" />
+<File name="drizzle/" />
+<File name="package.json" />
+</Folder>
+<Folder name="dashboard">
+<File name="src/" />
+<File name="package.json" />
+</Folder>
+</Folder>
+<Folder name="packages">
+<Folder name="cli">
+<File name="src/" />
+<File name="package.json" />
+</Folder>
+</Folder>
+<Folder name="deploy">
+<File name="nginx.conf" />
+</Folder>
+<File name="docker-compose.yml" />
+<File name="docker-compose.prod.yml" />
+<File name=".env" />
+<File name="package.json" />
+<File name="pnpm-workspace.yaml" />
+</Folder>
+</Files>
+
+## Deployment
+
+<Tabs items={["Docker Compose", "Manual Setup"]}>
+<Tab value="Docker Compose">
+<Steps>
+<Step>
+### Configure Environment
+
+Create a `.env` file in the project root:
+
+```bash
+DATABASE_URL=postgresql://kast:changeme@postgres:5432/kast
+KAFKA_BROKERS=redpanda:29092
+BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+BETTER_AUTH_URL=https://kast.yourdomain.com
+CORS_ORIGIN=https://dashboard.yourdomain.com
+PING_RETENTION_DAYS=30
+LOG_LEVEL=info
+```
+
+<Callout type="warn">
+`BETTER_AUTH_SECRET` must be a 32+ character random string used for session token signing. Generate it with `openssl rand -hex 32`. Never commit this value to version control. If this secret is compromised, all active sessions can be forged.
+</Callout>
+</Step>
+
+<Step>
+### Start All Services
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+This starts all services behind an nginx reverse proxy on port 80:
+
+- Redpanda (event streaming)
+- PostgreSQL (data storage)
+- Kast API (NestJS backend)
+- Kast Dashboard (Next.js frontend)
+- nginx (reverse proxy with WebSocket support)
+</Step>
+
+<Step>
+### Run Migrations
+
+```bash
+docker compose exec api pnpm db:migrate
+```
+</Step>
+
+<Step>
+### Verify Health
+
+```bash
+curl http://localhost:3001/ready
+```
+
+You should see `{"status":"ok","postgres":"connected","redpanda":"connected"}`.
+</Step>
+</Steps>
+</Tab>
+
+<Tab value="Manual Setup">
+<Steps>
+<Step>
+### Install Dependencies
+
+Ensure you have Node.js 22+, pnpm 9+, PostgreSQL 15+, and Redpanda (or Kafka) running.
+
+```bash
+git clone https://github.com/your-org/kast.git
+cd kast
+pnpm install
+```
+</Step>
+
+<Step>
+### Configure Environment
+
+Export the required environment variables or create a `.env` file:
+
+```bash
+export DATABASE_URL=postgresql://kast:password@localhost:5432/kast
+export KAFKA_BROKERS=localhost:29092
+export BETTER_AUTH_SECRET=$(openssl rand -hex 32)
+export BETTER_AUTH_URL=http://localhost:3001
+```
+</Step>
+
+<Step>
+### Run Migrations
+
+```bash
+cd apps/api
+pnpm db:migrate
+```
+</Step>
+
+<Step>
+### Build and Start
+
+```bash
+cd ../..
+pnpm build
+pnpm start
+```
+</Step>
+</Steps>
+</Tab>
+</Tabs>
+
+## Environment Variables
+
+| Variable | Default | Required | Description |
+|----------|---------|----------|-------------|
+| `DATABASE_URL` | -- | Yes | PostgreSQL connection string, e.g. `postgresql://kast:password@postgres:5432/kast` |
+| `KAFKA_BROKERS` | `localhost:29092` | Yes | Comma-separated Redpanda/Kafka broker addresses |
+| `API_PORT` | `3001` | No | Port the API server listens on |
+| `BETTER_AUTH_SECRET` | -- | Yes | 32+ character secret for session token signing. Generate with `openssl rand -hex 32`. |
+| `BETTER_AUTH_URL` | `http://localhost:3001` | Yes | Public URL of the API (used for session cookie domain and OAuth callbacks) |
+| `CORS_ORIGIN` | `*` | No | Allowed CORS origins. Set to your dashboard URL in production. |
+| `PING_RETENTION_DAYS` | `30` | No | Number of days to retain ping records in PostgreSQL before cleanup |
+| `LOG_LEVEL` | `info` | No | Log verbosity: `debug`, `info`, `warn`, `error` |
+
+## Hardware Requirements
+
+### Small Deployment (< 100 monitors)
+
+| Resource | Minimum |
+|----------|---------|
+| CPU | 1 vCPU |
+| RAM | 2 GB |
+| Disk | 10 GB (primarily for Redpanda event retention) |
+
+Suitable for a single VM or a small container instance. All services run on one machine.
+
+### Large Deployment (1000+ monitors)
+
+| Resource | Recommendation |
+|----------|---------------|
+| CPU | 4+ vCPU |
+| RAM | 8+ GB |
+| Disk | 50+ GB SSD |
+
+For horizontal scaling:
+
+- Run multiple Kast API replicas. Redpanda handles consumer group rebalancing automatically -- each replica joins the consumer groups and receives a partition assignment.
+- Run Redpanda as a 3-node cluster for fault tolerance.
+- Use a managed PostgreSQL instance (RDS, Cloud SQL) with read replicas if query load is high.
+
+## Reverse Proxy with nginx
+
+The repository includes a production-ready nginx configuration at `deploy/nginx.conf`. It handles:
+
+- HTTP routing to the API and dashboard
+- WebSocket upgrade for real-time dashboard updates
+- Proxy headers (`X-Forwarded-For`, `X-Forwarded-Proto`)
+- Static asset caching
+
+Reference the configuration in your Docker Compose override:
+
+```yaml
+nginx:
+  image: nginx:alpine
+  volumes:
+    - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+  ports:
+    - "80:80"
+  depends_on:
+    - api
+    - dashboard
+```
+
+## TLS / HTTPS with Caddy
+
+For automatic HTTPS with Let's Encrypt, use Caddy as your reverse proxy instead of nginx:
+
+```
+kast.yourdomain.com {
+    reverse_proxy api:3001 {
+        header_up X-Forwarded-Proto https
+    }
+}
+
+dashboard.yourdomain.com {
+    reverse_proxy dashboard:3000 {
+        header_up X-Forwarded-Proto https
+    }
+}
+```
+
+Caddy automatically obtains and renews TLS certificates. No manual certificate management required.
+
+## Backup Strategy
+
+### PostgreSQL
+
+Run `pg_dump` on a schedule. The database contains derived projections (pings, incidents, monitors) plus user accounts and API keys.
+
+```bash
+# Daily backup via cron
+0 4 * * * pg_dump -h postgres -U kast -Fc kast > /backups/kast-$(date +\%Y\%m\%d).dump
+```
+
+Monitor the backup itself with Kast:
+
+```bash
+0 4 * * * kast wrap BACKUP_PING_UUID -- pg_dump -h postgres -U kast -Fc kast > /backups/kast-$(date +\%Y\%m\%d).dump
+```
+
+### Redpanda
+
+Events are retained according to per-topic retention policies (7 days for `ping-events`, 30 days for `alert-deadletter`). For longer retention:
+
+```bash
+rpk topic alter-config ping-events --set retention.ms=2592000000  # 30 days
+```
+
+Because Redpanda is the source of truth, if you lose PostgreSQL you can replay the event log to reconstruct the projection. Redpanda data lives in `/var/lib/redpanda/data` inside the container -- mount this as a persistent volume.
+
+## Monitoring Kast Itself
+
+### Prometheus Metrics
+
+Kast exposes a `/metrics` endpoint in Prometheus exposition format. Scrape it with Prometheus or any compatible collector.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: kast
+    static_configs:
+      - targets: ['api:3001']
+    metrics_path: /metrics
+```
+
+#### Custom Kast Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `kast_ping_events_total` | Counter | Total ping events received, labeled by type (start, success, fail, log) |
+| `kast_incidents_opened_total` | Counter | Total incidents opened |
+| `kast_alert_deliveries_total` | Counter | Total alert delivery attempts, labeled by channel and status |
+| `kast_http_request_duration_seconds` | Histogram | HTTP request latency, labeled by method, path, and status code |
+
+In addition to these custom metrics, the default Node.js process metrics are exposed (heap usage, event loop lag, GC duration, active handles, etc.).
+
+### Health Checks
+
+| Endpoint | Type | Behavior |
+|----------|------|----------|
+| `GET /health` | Liveness probe | Always returns `200 OK` if the process is running. Use for container orchestrator liveness checks. |
+| `GET /ready` | Readiness probe | Returns `200 OK` only if both PostgreSQL and Redpanda connections are healthy. Returns `503` if either dependency is unreachable. Use for load balancer health checks. |
+
+Configure Docker health checks:
+
+```yaml
+api:
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+```
+
+Configure Kubernetes probes:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 10
+  periodSeconds: 30
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 3001
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```

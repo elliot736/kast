@@ -1,0 +1,841 @@
+---
+title: Integration Guide
+description: Copy-paste examples for monitoring cron jobs, Kubernetes CronJobs, Docker containers, CI/CD pipelines, and scheduled tasks in every major language and platform.
+---
+
+
+Kast works with any system that can make an HTTP request. No SDK needed. No agent to install. Just a `curl` at the end of your script.
+
+Every example below assumes you have created a monitor and have your ping UUID. Replace `UUID` with your actual ping UUID throughout.
+
+```
+BASE_URL=https://kast.example.com/ping/UUID
+```
+
+## System Crons (crontab)
+
+<Tabs items={["Simple curl", "kast wrap (recommended)", "Before / After"]}>
+<Tab value="Simple curl">
+
+Add a `curl` after your command:
+
+```bash
+# crontab -e
+0 3 * * * /usr/local/bin/backup.sh && curl -s https://kast.example.com/ping/UUID/success
+```
+
+This pings Kast only if `backup.sh` exits with code 0. If the script fails, no ping is sent, and Kast alerts you after the grace period.
+
+</Tab>
+<Tab value="kast wrap (recommended)">
+
+The `kast` CLI wraps your command and handles start, success, fail, and log pings automatically:
+
+```bash
+# crontab -e
+0 3 * * * kast wrap UUID -- /usr/local/bin/backup.sh
+```
+
+What `kast wrap` does:
+
+1. Pings `/start` before running the command
+2. Captures stdout and stderr
+3. Pings `/success` if exit code is 0, `/fail` with output if non-zero
+4. Sends captured output as `/log`
+5. Reports duration automatically
+
+This is the recommended approach for system crons. One line, full observability.
+
+</Tab>
+<Tab value="Before / After">
+
+**Before** (unmonitored):
+
+```
+0 3 * * * /usr/local/bin/backup.sh
+30 * * * * /usr/local/bin/sync-data.sh
+*/5 * * * * /usr/local/bin/healthcheck.sh
+```
+
+**After** (monitored with Kast):
+
+```
+0 3 * * * kast wrap abc123 -- /usr/local/bin/backup.sh
+30 * * * * kast wrap def456 -- /usr/local/bin/sync-data.sh
+*/5 * * * * kast wrap ghi789 -- /usr/local/bin/healthcheck.sh
+```
+
+</Tab>
+</Tabs>
+
+## Kubernetes CronJobs
+
+<Tabs items={["Sidecar container", "Post-command curl"]}>
+<Tab value="Sidecar container">
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: db-backup
+spec:
+  schedule: "0 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: your-org/backup:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -s $KAST_URL/start
+                  /usr/local/bin/backup.sh
+                  EXIT_CODE=$?
+                  if [ $EXIT_CODE -eq 0 ]; then
+                    curl -s $KAST_URL/success
+                  else
+                    curl -s -X POST -d "Exit code: $EXIT_CODE" $KAST_URL/fail
+                  fi
+                  exit $EXIT_CODE
+              env:
+                - name: KAST_URL
+                  value: "https://kast.example.com/ping/UUID"
+          restartPolicy: Never
+```
+
+</Tab>
+<Tab value="Post-command curl">
+
+Minimal approach — add a curl to your existing command:
+
+```yaml
+command:
+  - /bin/sh
+  - -c
+  - |
+    /usr/local/bin/backup.sh && \
+    curl -s https://kast.example.com/ping/UUID/success
+```
+
+</Tab>
+</Tabs>
+
+<Callout type="info">
+Store the ping UUID in a Kubernetes Secret or ConfigMap. Don't hardcode it in your manifests.
+</Callout>
+
+## Docker Containers
+
+<Tabs items={["Entrypoint wrapper", "Docker healthcheck"]}>
+<Tab value="Entrypoint wrapper">
+
+Create a wrapper script as your entrypoint:
+
+```bash
+#!/bin/bash
+# entrypoint.sh
+KAST_URL="https://kast.example.com/ping/${KAST_PING_UUID}"
+
+curl -s "$KAST_URL/start"
+
+"$@"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "Exit code: $EXIT_CODE" "$KAST_URL/fail"
+fi
+
+exit $EXIT_CODE
+```
+
+```dockerfile
+COPY entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["/usr/local/bin/backup.sh"]
+```
+
+</Tab>
+<Tab value="Docker healthcheck">
+
+For long-running containers with scheduled internal tasks:
+
+```dockerfile
+HEALTHCHECK --interval=5m --timeout=10s \
+  CMD curl -sf https://kast.example.com/ping/UUID/success || exit 1
+```
+
+This pings Kast every 5 minutes as long as the container is healthy.
+
+</Tab>
+</Tabs>
+
+## GitHub Actions
+
+```yaml
+name: Nightly Data Sync
+on:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Signal start
+        run: curl -s https://kast.example.com/ping/UUID/start
+
+      - name: Run sync
+        run: ./scripts/sync-data.sh
+
+      - name: Signal success
+        if: success()
+        run: curl -s https://kast.example.com/ping/UUID/success
+
+      - name: Signal failure
+        if: failure()
+        run: curl -s -X POST -d "GitHub Actions workflow failed" https://kast.example.com/ping/UUID/fail
+```
+
+## CI/CD Pipelines
+
+<Tabs items={["GitLab CI", "CircleCI", "Jenkins"]}>
+<Tab value="GitLab CI">
+
+```yaml
+nightly-backup:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - curl -s https://kast.example.com/ping/UUID/start
+    - ./backup.sh
+  after_script:
+    - |
+      if [ "$CI_JOB_STATUS" == "success" ]; then
+        curl -s https://kast.example.com/ping/UUID/success
+      else
+        curl -s -X POST -d "Job failed: $CI_JOB_STATUS" https://kast.example.com/ping/UUID/fail
+      fi
+```
+
+</Tab>
+<Tab value="CircleCI">
+
+```yaml
+jobs:
+  nightly-sync:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: curl -s https://kast.example.com/ping/UUID/start
+      - run: ./sync.sh
+      - run:
+          name: Signal success
+          command: curl -s https://kast.example.com/ping/UUID/success
+          when: on_success
+      - run:
+          name: Signal failure
+          command: curl -s -X POST https://kast.example.com/ping/UUID/fail
+          when: on_fail
+
+workflows:
+  nightly:
+    triggers:
+      - schedule:
+          cron: "0 5 * * *"
+    jobs:
+      - nightly-sync
+```
+
+</Tab>
+<Tab value="Jenkins">
+
+```groovy
+pipeline {
+    triggers { cron('0 3 * * *') }
+    stages {
+        stage('Run') {
+            steps {
+                sh 'curl -s https://kast.example.com/ping/UUID/start'
+                sh './backup.sh'
+            }
+        }
+    }
+    post {
+        success { sh 'curl -s https://kast.example.com/ping/UUID/success' }
+        failure { sh 'curl -s -X POST -d "Build failed" https://kast.example.com/ping/UUID/fail' }
+    }
+}
+```
+
+</Tab>
+</Tabs>
+
+## Python
+
+<Tabs items={["Plain script", "Celery Beat", "APScheduler"]}>
+<Tab value="Plain script">
+
+```python
+import httpx
+
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+def main():
+    httpx.get(f"{KAST_URL}/start")
+    try:
+        run_my_job()
+        httpx.get(f"{KAST_URL}/success")
+    except Exception as e:
+        httpx.post(f"{KAST_URL}/fail", content=str(e))
+        raise
+
+if __name__ == "__main__":
+    main()
+```
+
+</Tab>
+<Tab value="Celery Beat">
+
+```python
+from celery import Celery
+from celery.signals import task_success, task_failure
+import httpx
+
+app = Celery("tasks")
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+@app.task
+def nightly_backup():
+    httpx.get(f"{KAST_URL}/start")
+    perform_backup()
+
+@task_success.connect(sender=nightly_backup)
+def on_success(**kwargs):
+    httpx.get(f"{KAST_URL}/success")
+
+@task_failure.connect(sender=nightly_backup)
+def on_failure(**kwargs):
+    httpx.post(f"{KAST_URL}/fail", content=str(kwargs.get("exception", "")))
+```
+
+</Tab>
+<Tab value="APScheduler">
+
+```python
+from apscheduler.schedulers.blocking import BlockingScheduler
+import httpx
+
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+def job():
+    httpx.get(f"{KAST_URL}/start")
+    try:
+        do_work()
+        httpx.get(f"{KAST_URL}/success")
+    except Exception as e:
+        httpx.post(f"{KAST_URL}/fail", content=str(e))
+
+scheduler = BlockingScheduler()
+scheduler.add_job(job, "cron", hour=3)
+scheduler.start()
+```
+
+</Tab>
+</Tabs>
+
+## Node.js
+
+<Tabs items={["Plain script", "BullMQ", "node-cron"]}>
+<Tab value="Plain script">
+
+```javascript
+const KAST_URL = "https://kast.example.com/ping/UUID";
+
+async function main() {
+  await fetch(`${KAST_URL}/start`);
+  try {
+    await runJob();
+    await fetch(`${KAST_URL}/success`);
+  } catch (err) {
+    await fetch(`${KAST_URL}/fail`, {
+      method: "POST",
+      body: err.message,
+    });
+    throw err;
+  }
+}
+
+main();
+```
+
+</Tab>
+<Tab value="BullMQ">
+
+```typescript
+import { Worker } from "bullmq";
+
+const KAST_URL = "https://kast.example.com/ping/UUID";
+
+const worker = new Worker("nightly-sync", async (job) => {
+  await fetch(`${KAST_URL}/start`);
+  try {
+    await performSync(job.data);
+    await fetch(`${KAST_URL}/success`);
+  } catch (err) {
+    await fetch(`${KAST_URL}/fail`, {
+      method: "POST",
+      body: err instanceof Error ? err.message : "Unknown error",
+    });
+    throw err;
+  }
+});
+```
+
+</Tab>
+<Tab value="node-cron">
+
+```javascript
+import cron from "node-cron";
+
+const KAST_URL = "https://kast.example.com/ping/UUID";
+
+cron.schedule("0 3 * * *", async () => {
+  await fetch(`${KAST_URL}/start`);
+  try {
+    await runBackup();
+    await fetch(`${KAST_URL}/success`);
+  } catch (err) {
+    await fetch(`${KAST_URL}/fail`, { method: "POST", body: err.message });
+  }
+});
+```
+
+</Tab>
+</Tabs>
+
+## Go
+
+<Tabs items={["Plain goroutine", "gocron"]}>
+<Tab value="Plain goroutine">
+
+```go
+package main
+
+import (
+	"net/http"
+	"strings"
+)
+
+const kastURL = "https://kast.example.com/ping/UUID"
+
+func main() {
+	http.Get(kastURL + "/start")
+
+	if err := runJob(); err != nil {
+		http.Post(kastURL+"/fail", "text/plain", strings.NewReader(err.Error()))
+		panic(err)
+	}
+
+	http.Get(kastURL + "/success")
+}
+```
+
+</Tab>
+<Tab value="gocron">
+
+```go
+package main
+
+import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-co-op/gocron/v2"
+)
+
+const kastURL = "https://kast.example.com/ping/UUID"
+
+func main() {
+	s, _ := gocron.NewScheduler()
+
+	s.NewJob(
+		gocron.DailyJob(1, gocron.NewAtTimes(gocron.NewAtTime(3, 0, 0))),
+		gocron.NewTask(func() {
+			http.Get(kastURL + "/start")
+			if err := runBackup(); err != nil {
+				http.Post(kastURL+"/fail", "text/plain", strings.NewReader(err.Error()))
+				return
+			}
+			http.Get(kastURL + "/success")
+		}),
+	)
+
+	s.Start()
+	select {}
+}
+```
+
+</Tab>
+</Tabs>
+
+## Ruby
+
+<Tabs items={["Sidekiq", "Whenever gem"]}>
+<Tab value="Sidekiq">
+
+```ruby
+class NightlyBackupJob
+  include Sidekiq::Job
+
+  KAST_URL = "https://kast.example.com/ping/UUID"
+
+  def perform
+    Net::HTTP.get(URI("#{KAST_URL}/start"))
+    run_backup
+    Net::HTTP.get(URI("#{KAST_URL}/success"))
+  rescue => e
+    Net::HTTP.post(URI("#{KAST_URL}/fail"), e.message)
+    raise
+  end
+end
+```
+
+</Tab>
+<Tab value="Whenever gem">
+
+```ruby
+# config/schedule.rb
+every 1.day, at: "3:00 am" do
+  command "kast wrap UUID -- /usr/local/bin/backup.sh"
+end
+```
+
+</Tab>
+</Tabs>
+
+## PHP (Laravel)
+
+```php
+// app/Console/Kernel.php
+protected function schedule(Schedule $schedule)
+{
+    $schedule->command('backup:run')
+        ->dailyAt('03:00')
+        ->before(function () {
+            Http::get('https://kast.example.com/ping/UUID/start');
+        })
+        ->after(function () {
+            Http::get('https://kast.example.com/ping/UUID/success');
+        })
+        ->onFailure(function () {
+            Http::post('https://kast.example.com/ping/UUID/fail');
+        });
+}
+```
+
+## Database Jobs
+
+<Tabs items={["pg_cron", "MySQL Events"]}>
+<Tab value="pg_cron">
+
+```sql
+-- Requires pg_cron and pg_net extensions
+SELECT cron.schedule(
+  'nightly-vacuum',
+  '0 3 * * *',
+  $$
+    DO $do$
+    BEGIN
+      VACUUM ANALYZE;
+      PERFORM net.http_get('https://kast.example.com/ping/UUID/success');
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM net.http_post(
+        'https://kast.example.com/ping/UUID/fail',
+        body := SQLERRM
+      );
+    END $do$;
+  $$
+);
+```
+
+</Tab>
+<Tab value="MySQL Events">
+
+```sql
+-- MySQL doesn't support HTTP natively.
+-- Use a wrapper script instead:
+-- 0 3 * * * kast wrap UUID -- mysql -e "CALL run_maintenance()"
+```
+
+</Tab>
+</Tabs>
+
+## Data Pipelines
+
+<Tabs items={["Airflow", "dbt", "Prefect"]}>
+<Tab value="Airflow">
+
+```python
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from airflow.operators.python import PythonOperator
+from datetime import datetime
+import httpx
+
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+dag = DAG("etl_pipeline", schedule_interval="0 3 * * *", start_date=datetime(2024, 1, 1))
+
+start = BashOperator(
+    task_id="ping_start",
+    bash_command=f"curl -s {KAST_URL}/start",
+    dag=dag,
+)
+
+etl = BashOperator(
+    task_id="run_etl",
+    bash_command="/usr/local/bin/run-etl.sh",
+    dag=dag,
+)
+
+success = BashOperator(
+    task_id="ping_success",
+    bash_command=f"curl -s {KAST_URL}/success",
+    trigger_rule="all_success",
+    dag=dag,
+)
+
+fail = BashOperator(
+    task_id="ping_fail",
+    bash_command=f"curl -s -X POST {KAST_URL}/fail",
+    trigger_rule="one_failed",
+    dag=dag,
+)
+
+start >> etl >> [success, fail]
+```
+
+</Tab>
+<Tab value="dbt">
+
+```bash
+#!/bin/bash
+# run-dbt.sh
+KAST_URL="https://kast.example.com/ping/UUID"
+
+curl -s "$KAST_URL/start"
+
+OUTPUT=$(dbt run --target prod 2>&1)
+EXIT_CODE=$?
+
+curl -s -X POST -d "$OUTPUT" "$KAST_URL/log"
+
+if [ $EXIT_CODE -eq 0 ]; then
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "dbt run failed with exit code $EXIT_CODE" "$KAST_URL/fail"
+fi
+```
+
+</Tab>
+<Tab value="Prefect">
+
+```python
+from prefect import flow
+import httpx
+
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+@flow
+def etl_pipeline():
+    httpx.get(f"{KAST_URL}/start")
+    try:
+        extract()
+        transform()
+        load()
+        httpx.get(f"{KAST_URL}/success")
+    except Exception as e:
+        httpx.post(f"{KAST_URL}/fail", content=str(e))
+        raise
+```
+
+</Tab>
+</Tabs>
+
+## Cloud Functions
+
+<Tabs items={["AWS Lambda", "GCP Cloud Functions", "Azure Functions"]}>
+<Tab value="AWS Lambda">
+
+```python
+# Triggered by EventBridge schedule rule
+import urllib.request
+
+KAST_URL = "https://kast.example.com/ping/UUID"
+
+def handler(event, context):
+    urllib.request.urlopen(f"{KAST_URL}/start")
+    try:
+        result = process_data(event)
+        urllib.request.urlopen(f"{KAST_URL}/success")
+        return result
+    except Exception as e:
+        req = urllib.request.Request(
+            f"{KAST_URL}/fail",
+            data=str(e).encode(),
+            method="POST",
+        )
+        urllib.request.urlopen(req)
+        raise
+```
+
+</Tab>
+<Tab value="GCP Cloud Functions">
+
+```javascript
+// Triggered by Cloud Scheduler via Pub/Sub
+exports.nightlySync = async (event, context) => {
+  await fetch("https://kast.example.com/ping/UUID/start");
+  try {
+    await performSync();
+    await fetch("https://kast.example.com/ping/UUID/success");
+  } catch (err) {
+    await fetch("https://kast.example.com/ping/UUID/fail", {
+      method: "POST",
+      body: err.message,
+    });
+    throw err;
+  }
+};
+```
+
+</Tab>
+<Tab value="Azure Functions">
+
+```javascript
+// Timer trigger (function.json: schedule "0 0 3 * * *")
+module.exports = async function (context, timer) {
+  await fetch("https://kast.example.com/ping/UUID/start");
+  try {
+    await runJob();
+    await fetch("https://kast.example.com/ping/UUID/success");
+  } catch (err) {
+    await fetch("https://kast.example.com/ping/UUID/fail", {
+      method: "POST",
+      body: err.message,
+    });
+    throw err;
+  }
+};
+```
+
+</Tab>
+</Tabs>
+
+## Backup Tools
+
+<Tabs items={["restic", "borgbackup", "pg_dump", "mysqldump"]}>
+<Tab value="restic">
+
+```bash
+#!/bin/bash
+KAST_URL="https://kast.example.com/ping/UUID"
+curl -s "$KAST_URL/start"
+
+OUTPUT=$(restic backup /data --json 2>&1)
+EXIT_CODE=$?
+
+curl -s -X POST -d "$OUTPUT" "$KAST_URL/log"
+
+if [ $EXIT_CODE -eq 0 ]; then
+  restic forget --keep-daily 7 --keep-weekly 4 --prune
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "restic backup failed: $OUTPUT" "$KAST_URL/fail"
+fi
+```
+
+</Tab>
+<Tab value="borgbackup">
+
+```bash
+#!/bin/bash
+KAST_URL="https://kast.example.com/ping/UUID"
+curl -s "$KAST_URL/start"
+
+borg create --stats "::backup-{now}" /data 2>&1 | \
+  curl -s -X POST -d @- "$KAST_URL/log"
+
+if [ ${PIPESTATUS[0]} -eq 0 ]; then
+  borg prune --keep-daily=7 --keep-weekly=4
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "borg create failed" "$KAST_URL/fail"
+fi
+```
+
+</Tab>
+<Tab value="pg_dump">
+
+```bash
+#!/bin/bash
+KAST_URL="https://kast.example.com/ping/UUID"
+curl -s "$KAST_URL/start"
+
+DUMP_FILE="/backups/mydb-$(date +%F).sql.gz"
+pg_dump mydb | gzip > "$DUMP_FILE" 2>/tmp/pg_dump_err.txt
+
+if [ $? -eq 0 ]; then
+  SIZE=$(du -h "$DUMP_FILE" | cut -f1)
+  curl -s -X POST -d "Backup complete: $DUMP_FILE ($SIZE)" "$KAST_URL/log"
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "$(cat /tmp/pg_dump_err.txt)" "$KAST_URL/fail"
+fi
+```
+
+</Tab>
+<Tab value="mysqldump">
+
+```bash
+#!/bin/bash
+KAST_URL="https://kast.example.com/ping/UUID"
+curl -s "$KAST_URL/start"
+
+mysqldump --all-databases | gzip > "/backups/all-$(date +%F).sql.gz" 2>/tmp/mysql_err.txt
+
+if [ $? -eq 0 ]; then
+  curl -s "$KAST_URL/success"
+else
+  curl -s -X POST -d "$(cat /tmp/mysql_err.txt)" "$KAST_URL/fail"
+fi
+```
+
+</Tab>
+</Tabs>
+
+## Recommended Settings
+
+| Job Type | Suggested Schedule | Grace Period | Max Runtime |
+|---|---|---|---|
+| Database backup | `0 3 * * *` (daily 3am) | 15 minutes | 2 hours |
+| Data sync / ETL | `0 */6 * * *` (every 6h) | 30 minutes | 4 hours |
+| Email digest | `0 9 * * 1` (Mon 9am) | 30 minutes | 1 hour |
+| Health check | `*/5 * * * *` (every 5min) | 5 minutes | 1 minute |
+| Invoice processing | `0 2 1 * *` (1st of month) | 1 hour | 6 hours |
+| Log rotation | `0 0 * * *` (daily midnight) | 15 minutes | 30 minutes |
+| Cache warm-up | `*/30 * * * *` (every 30min) | 10 minutes | 15 minutes |
+| SSL cert renewal | `0 0 * * 0` (weekly) | 1 hour | 30 minutes |
+| Backup verification | `0 6 * * *` (daily 6am) | 30 minutes | 2 hours |
+
+<Callout type="info">
+Grace periods should account for schedule variability, not job duration. If your cron sometimes starts 2 minutes late due to system load, set the grace period to at least 5 minutes. Use max runtime to catch stuck jobs.
+</Callout>

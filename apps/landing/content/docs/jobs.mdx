@@ -1,0 +1,170 @@
+---
+title: Job Execution
+description: Schedule and execute jobs with attached workflows, automatic retries, concurrency control, and structured logging.
+---
+
+Jobs let Kast execute workflows on a cron schedule. When a job runs, Kast delegates execution to the attached [workflow](/docs/workflows), records step results, duration, and any errors. Failed jobs can retry automatically with exponential backoff, and concurrency limits prevent overlapping runs.
+
+## Creating a Job
+
+```bash
+curl -X POST http://localhost:3001/api/v1/jobs \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Nightly Backup",
+    "slug": "nightly-backup",
+    "schedule": "0 3 * * *",
+    "tags": ["infrastructure"]
+  }'
+```
+
+### Configuration
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Display name |
+| `slug` | string | required | URL-safe identifier (lowercase, hyphens). Auto-generated from name in the dashboard. |
+| `schedule` | string | required | Cron expression (5-field) |
+| `timezone` | string | `UTC` | IANA timezone for schedule evaluation |
+| `monitorId` | uuid | -- | Link to a monitor for incident/alert bridging |
+| `tags` | string[] | `[]` | Tags for filtering and grouping |
+
+After creating a job, [attach a workflow](/docs/workflows) to define what it executes.
+
+## Workflows
+
+Jobs execute through workflows -- DAG-based pipelines of steps that can make HTTP calls, sleep, branch conditionally, spawn child jobs, and fan out in parallel. A job without a workflow will fail when triggered.
+
+```bash
+# Attach a workflow to a job
+curl -X PUT http://localhost:3001/api/v1/jobs/JOB_ID/workflow \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "steps": {
+      "nodes": [
+        {
+          "id": "run-backup",
+          "name": "Run Backup",
+          "type": "run",
+          "config": {
+            "url": "https://api.example.com/run-backup",
+            "method": "POST",
+            "timeoutSeconds": 120
+          }
+        }
+      ],
+      "edges": []
+    }
+  }'
+```
+
+See [Workflows](/docs/workflows) for the full step type reference, conditional branching, and DAG configuration.
+
+## Retries
+
+Configure automatic retries with exponential backoff:
+
+```json
+{
+  "maxRetries": 3,
+  "retryDelaySeconds": 60,
+  "retryBackoffMultiplier": 2,
+  "retryMaxDelaySeconds": 3600
+}
+```
+
+With these settings, a failed job retries after 60s, then 120s, then 240s. Each retry creates a new run linked to the original via `parentRunId`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `maxRetries` | number | `0` | Maximum retry attempts (0 = no retries) |
+| `retryDelaySeconds` | number | `60` | Base delay between retries |
+| `retryBackoffMultiplier` | number | `2` | Multiplier applied to delay each attempt |
+| `retryMaxDelaySeconds` | number | `3600` | Cap on retry delay |
+
+## Concurrency Control
+
+Prevent overlapping runs with concurrency limits:
+
+```json
+{
+  "concurrencyLimit": 1,
+  "concurrencyPolicy": "skip"
+}
+```
+
+| Policy | Behavior |
+|--------|----------|
+| `queue` | New runs wait for a slot (default) |
+| `skip` | New runs are cancelled if at the limit |
+| `cancel` | The oldest running job is cancelled to make room |
+
+## Manual Triggers
+
+```bash
+curl -X POST http://localhost:3001/api/v1/jobs/JOB_ID/trigger \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Creates a run with `trigger: "manual"` that executes immediately, independent of the cron schedule.
+
+## Pause and Resume
+
+```bash
+# Pause -- stops scheduled execution
+curl -X POST http://localhost:3001/api/v1/jobs/JOB_ID/pause \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Resume -- recomputes nextRunAt and resumes
+curl -X POST http://localhost:3001/api/v1/jobs/JOB_ID/resume \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+## Runs
+
+Each execution creates a run record with:
+
+- **Status**: `scheduled`, `running`, `success`, `failed`, `timeout`, `cancelled`
+- **Trigger**: `cron`, `manual`, `retry`
+- **Workflow results**: step-by-step execution history with outputs and durations
+- **Retry chain**: `parentRunId` links retries to the original run
+
+```bash
+# List runs
+curl http://localhost:3001/api/v1/jobs/JOB_ID/runs?status=failed \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Get run detail
+curl http://localhost:3001/api/v1/jobs/JOB_ID/runs/RUN_ID \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Cancel a running or scheduled run
+curl -X POST http://localhost:3001/api/v1/jobs/JOB_ID/runs/RUN_ID/cancel \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+## Execution Logs
+
+Every run emits structured log events at key milestones (execution started, workflow step executed, response received, retry scheduled). Logs are streamed in real-time via WebSocket and persisted to the database.
+
+```bash
+curl http://localhost:3001/api/v1/jobs/JOB_ID/runs/RUN_ID/logs \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Each entry has a `level` (info, warn, error, debug), `message`, optional `metadata`, and `timestamp`.
+
+## Stats
+
+```bash
+curl http://localhost:3001/api/v1/jobs/JOB_ID/stats \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Returns 30-day aggregates: total runs, successes, failures, timeouts, retries, success rate, and average duration.
+
+## Monitor Bridge
+
+When a job has a `monitorId`, execution results are translated into synthetic ping events -- `success` or `fail` -- published to the same `ping-events` topic. This feeds into the existing incident detection, alerting, and status page pipeline.

@@ -1,0 +1,584 @@
+---
+title: API Reference
+description: Complete REST API reference for Kast covering all endpoints for pings, monitors, incidents, alerts, dead letters, replay, teams, API keys, health checks, status pages, and Prometheus metrics.
+---
+
+
+Base URL: `http://localhost:3001` (or your deployment URL).
+
+Full Swagger documentation is available at `/api/docs` when the API is running.
+
+## Authentication
+
+<ImageZoom src="/diagrams/auth.png" width={926} height={994} alt="Authentication flow showing API key and session-based dual authentication" />
+
+Kast supports two authentication methods:
+
+| Method | Header | Use Case |
+|--------|--------|----------|
+| **API Key** | `x-api-key: kst_YOUR_KEY` | Server-to-server, CLI, scripts, CI/CD |
+| **Session Cookie** | `Cookie: session=...` | Dashboard (browser-based, set after login via Better Auth) |
+
+Both methods are accepted on all authenticated endpoints. Ping ingestion, health, and status page endpoints are public -- no authentication required.
+
+API keys are prefixed with `kst_` and can be created via `POST /api/v1/api-keys` (public endpoint) or `kast api-keys create` (CLI).
+
+## Database Schema
+
+<ImageZoom src="/diagrams/database.png" width={961} height={1509} alt="Database ERD showing all 10 tables with relationships and key columns" />
+
+The database contains 10 tables: `monitors`, `pings`, `incidents`, `alert_configs`, `alert_deliveries`, `dead_letters`, `teams`, `api_keys`, `users`, `sessions`, and `accounts`. All IDs are UUIDs. Timestamps use `timestamptz`.
+
+---
+
+## Endpoint Groups
+
+<Accordions>
+<Accordion title="Ping Ingestion (Public)">
+No authentication required. Rate limited to **300 requests/minute per source IP**.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/ping/:uuid` | Simple success ping |
+| POST | `/ping/:uuid/start` | Signal job started |
+| POST | `/ping/:uuid/success` | Signal job succeeded |
+| POST | `/ping/:uuid/fail` | Signal job failed |
+| POST | `/ping/:uuid/log` | Append log output |
+
+All endpoints return `202 Accepted` on success.
+
+**Request body** (POST only): optional, max 64 KB. Any content type. Stored as metadata on the ping event.
+
+**Error responses:**
+
+| Status | Meaning |
+|--------|---------|
+| `404 Not Found` | UUID does not match any monitor |
+| `429 Too Many Requests` | Rate limit exceeded (`Retry-After` header included) |
+</Accordion>
+
+<Accordion title="Monitors">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/monitors` | Create a monitor |
+| GET | `/api/v1/monitors` | List monitors |
+| GET | `/api/v1/monitors/:id` | Get monitor by ID |
+| PATCH | `/api/v1/monitors/:id` | Update monitor |
+| DELETE | `/api/v1/monitors/:id` | Delete monitor |
+| POST | `/api/v1/monitors/:id/pause` | Pause monitoring |
+| POST | `/api/v1/monitors/:id/resume` | Resume monitoring |
+| GET | `/api/v1/monitors/:id/pings` | Get ping history |
+| GET | `/api/v1/monitors/:id/stats` | Get uptime stats (30-day window) |
+
+### POST /api/v1/monitors
+
+Create a new monitor.
+
+**Request body:**
+
+```json
+{
+  "name": "DB Backup",
+  "slug": "db-backup",
+  "description": "Nightly PostgreSQL backup to S3",
+  "schedule": "0 3 * * *",
+  "intervalSeconds": null,
+  "graceSeconds": 600,
+  "maxRuntimeSeconds": 3600,
+  "tags": ["production", "database"],
+  "teamId": "uuid",
+  "logRetentionDays": 90
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | -- | Human-readable name |
+| `slug` | string | Yes | -- | URL-safe identifier (`[a-z0-9-]+`) |
+| `description` | string | No | `null` | Optional description |
+| `schedule` | string | No | `null` | Cron expression (mutually exclusive with `intervalSeconds`) |
+| `intervalSeconds` | number | No | `null` | Interval between expected pings |
+| `graceSeconds` | number | No | `300` | Grace period before `down` |
+| `maxRuntimeSeconds` | number | No | `null` | Max allowed job duration |
+| `tags` | string[] | No | `[]` | Freeform tags (GIN-indexed JSONB) |
+| `teamId` | string | No | `null` | Team UUID for grouping and status pages |
+| `logRetentionDays` | number | No | `null` | Per-monitor log retention override |
+
+**Response:** `201 Created`
+
+```json
+{
+  "id": "uuid",
+  "name": "DB Backup",
+  "slug": "db-backup",
+  "pingUuid": "uuid",
+  "status": "healthy",
+  "nextExpectedAt": "2026-03-25T03:00:00.000Z",
+  "createdAt": "2026-03-24T12:00:00.000Z"
+}
+```
+
+### GET /api/v1/monitors
+
+List monitors with optional filters.
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status (`healthy`, `late`, `down`, `paused`) |
+| `tag` | string | Filter by tag (repeatable for AND logic) |
+| `teamId` | string | Filter by team UUID |
+
+### GET /api/v1/monitors/:id/stats
+
+Returns 30-day uptime statistics.
+
+**Response:**
+
+```json
+{
+  "uptimePercent": 99.85,
+  "avgRuntimeMs": 45200,
+  "failureRate": 0.003,
+  "totalPings": 720,
+  "totalIncidents": 1,
+  "periodDays": 30
+}
+```
+</Accordion>
+
+<Accordion title="Jobs">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/jobs` | Create a job |
+| GET | `/api/v1/jobs` | List jobs |
+| GET | `/api/v1/jobs/:id` | Get job by ID |
+| PATCH | `/api/v1/jobs/:id` | Update job |
+| DELETE | `/api/v1/jobs/:id` | Delete job (cascades runs) |
+| POST | `/api/v1/jobs/:id/pause` | Pause scheduled execution |
+| POST | `/api/v1/jobs/:id/resume` | Resume and recompute nextRunAt |
+| POST | `/api/v1/jobs/:id/trigger` | Trigger a manual run |
+| GET | `/api/v1/jobs/:id/runs` | List runs |
+| GET | `/api/v1/jobs/:id/runs/:runId` | Get run detail |
+| GET | `/api/v1/jobs/:id/runs/:runId/logs` | Get run execution logs |
+| POST | `/api/v1/jobs/:id/runs/:runId/cancel` | Cancel a run |
+| GET | `/api/v1/jobs/:id/stats` | Get 30-day job statistics |
+
+### POST /api/v1/jobs
+
+Create a new job.
+
+**Request body:**
+
+```json
+{
+  "name": "Nightly Backup",
+  "slug": "nightly-backup",
+  "schedule": "0 3 * * *",
+  "timezone": "UTC",
+  "tags": ["infrastructure"],
+  "monitorId": "uuid"
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | -- | Display name |
+| `slug` | string | Yes | -- | URL-safe identifier (`[a-z0-9-]+`) |
+| `schedule` | string | Yes | -- | Cron expression (5-field) |
+| `timezone` | string | No | `UTC` | IANA timezone |
+| `tags` | string[] | No | `[]` | Freeform tags |
+| `monitorId` | string | No | `null` | Monitor UUID for incident bridging |
+| `maxRetries` | number | No | `0` | Max retry attempts |
+| `retryDelaySeconds` | number | No | `60` | Base retry delay |
+| `retryBackoffMultiplier` | number | No | `2` | Backoff multiplier |
+| `retryMaxDelaySeconds` | number | No | `3600` | Max retry delay |
+| `concurrencyLimit` | number | No | `1` | Max concurrent runs |
+| `concurrencyPolicy` | string | No | `queue` | `queue`, `skip`, or `cancel` |
+
+See [Job Execution](/docs/jobs) for full configuration reference.
+</Accordion>
+
+<Accordion title="Workflows">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/jobs/:id/workflow` | Get workflow definition |
+| PUT | `/api/v1/jobs/:id/workflow` | Create or update workflow (new version) |
+| GET | `/api/v1/jobs/:id/runs/:runId/workflow` | Get workflow run detail with step results |
+| POST | `/api/v1/jobs/:id/runs/:runId/workflow/cancel` | Cancel a workflow run |
+
+### PUT /api/v1/jobs/:id/workflow
+
+Create or update a workflow using the DAG model.
+
+**Request body:**
+
+```json
+{
+  "steps": {
+    "nodes": [
+      {
+        "id": "step-1",
+        "name": "Call API",
+        "type": "run",
+        "config": { "url": "https://example.com/api", "method": "POST" }
+      }
+    ],
+    "edges": []
+  }
+}
+```
+
+Node types: `run`, `sleep`, `condition`, `run_job`, `fan_out`, `webhook_wait`. See [Workflows](/docs/workflows) for full step type reference, conditional branching, loops, and DAG configuration.
+</Accordion>
+
+<Accordion title="Incidents">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/incidents` | List incidents |
+| GET | `/api/v1/incidents/:id` | Get incident detail |
+| POST | `/api/v1/incidents/:id/acknowledge` | Acknowledge an incident |
+
+### GET /api/v1/incidents
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `status` | string | Filter by status (`open`, `acknowledged`, `resolved`) |
+
+**Response:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "monitorId": "uuid",
+    "monitorName": "DB Backup",
+    "status": "open",
+    "reason": "Ping missed",
+    "consecutiveFailures": 3,
+    "openedAt": "2026-03-24T03:10:00.000Z",
+    "acknowledgedAt": null,
+    "resolvedAt": null
+  }
+]
+```
+
+### POST /api/v1/incidents/:id/acknowledge
+
+Acknowledge an open incident. Does not resolve it -- the monitor remains `down` until a success ping arrives.
+
+**Response:** `200 OK`
+
+```json
+{
+  "id": "uuid",
+  "status": "acknowledged",
+  "acknowledgedAt": "2026-03-24T03:15:00.000Z"
+}
+```
+</Accordion>
+
+<Accordion title="Alert Configs">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/alert-configs` | Create an alert config |
+| GET | `/api/v1/alert-configs` | List alert configs |
+| PATCH | `/api/v1/alert-configs/:id` | Update an alert config |
+| DELETE | `/api/v1/alert-configs/:id` | Delete an alert config |
+
+### POST /api/v1/alert-configs
+
+**Request body:**
+
+```json
+{
+  "monitorId": "uuid",
+  "channel": "slack",
+  "destination": "https://hooks.slack.com/services/T.../B.../xxx",
+  "config": {},
+  "cooldownMinutes": 30,
+  "thresholdFailures": 1,
+  "isEnabled": true
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `monitorId` | string | Yes | -- | Monitor UUID |
+| `channel` | string | Yes | -- | `slack`, `discord`, `email`, `webhook`, `pagerduty`, `telegram` |
+| `destination` | string | Yes | -- | Channel-specific target |
+| `config` | object | No | `{}` | Channel-specific extra config (headers, botToken, SMTP) |
+| `cooldownMinutes` | number | No | `30` | Minutes between alerts |
+| `thresholdFailures` | number | No | `1` | Consecutive failures before alerting |
+| `isEnabled` | boolean | No | `true` | Enable/disable without deleting |
+
+### GET /api/v1/alert-configs
+
+**Query parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `monitorId` | string | Filter by monitor UUID |
+</Accordion>
+
+<Accordion title="Dead Letters">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/dead-letters` | List failed alert deliveries |
+| POST | `/api/v1/dead-letters/:id/retry` | Retry a failed delivery |
+
+### GET /api/v1/dead-letters
+
+**Response:**
+
+```json
+[
+  {
+    "id": "uuid",
+    "monitorId": "uuid",
+    "monitorName": "DB Backup",
+    "channel": "slack",
+    "destination": "https://hooks.slack.com/...",
+    "attempts": 5,
+    "lastError": "HTTP 502 Bad Gateway",
+    "lastAttemptAt": "2026-03-24T09:10:00.000Z",
+    "createdAt": "2026-03-24T03:10:00.000Z"
+  }
+]
+```
+
+### POST /api/v1/dead-letters/:id/retry
+
+Re-publishes the alert to `alert-triggers` for a fresh delivery cycle.
+
+**Response:** `200 OK`
+</Accordion>
+
+<Accordion title="Replay">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/replay` | Create a replay session |
+| GET | `/api/v1/replay/:id` | Get session status |
+| GET | `/api/v1/replay/:id/events` | Stream events via SSE |
+| POST | `/api/v1/replay/:id/cancel` | Cancel a session |
+
+### POST /api/v1/replay
+
+**Request body:**
+
+```json
+{
+  "fromTimestamp": 1711929600000,
+  "toTimestamp": 1711933200000,
+  "topic": "ping-events",
+  "monitorId": "uuid"
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `fromTimestamp` | number | Yes | -- | Start time (Unix ms) |
+| `toTimestamp` | number | Yes | -- | End time (Unix ms) |
+| `topic` | string | No | `ping-events` | Topic to replay |
+| `monitorId` | string | No | `null` | Filter by monitor |
+
+**Response:** `201 Created`
+
+```json
+{
+  "sessionId": "abc123",
+  "status": "running"
+}
+```
+
+### GET /api/v1/replay/:id/events
+
+SSE stream. Returns events in three message types: `events`, `heartbeat`, `error`. See [Incident Replay](/docs/incident-replay) for details.
+</Accordion>
+
+<Accordion title="Teams">
+All endpoints require authentication.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/teams` | Create a team |
+| GET | `/api/v1/teams` | List teams |
+| GET | `/api/v1/teams/:id` | Get team by ID |
+| PATCH | `/api/v1/teams/:id` | Update a team |
+| DELETE | `/api/v1/teams/:id` | Delete a team |
+
+### POST /api/v1/teams
+
+**Request body:**
+
+```json
+{
+  "name": "Platform Team",
+  "slug": "platform"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Team display name |
+| `slug` | string | Yes | URL-safe identifier for status page path |
+</Accordion>
+
+<Accordion title="API Keys">
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/api/v1/api-keys` | **Public** | Create a new API key |
+| GET | `/api/v1/api-keys` | Required | List API keys (keys masked) |
+| DELETE | `/api/v1/api-keys/:id` | Required | Revoke an API key |
+
+### POST /api/v1/api-keys
+
+Public endpoint for bootstrapping. No authentication required.
+
+**Request body:**
+
+```json
+{
+  "label": "deploy-bot"
+}
+```
+
+**Response:** `201 Created`
+
+```json
+{
+  "id": "uuid",
+  "label": "deploy-bot",
+  "key": "kst_abc123...",
+  "createdAt": "2026-03-24T00:00:00.000Z"
+}
+```
+
+The `key` is shown only once. Store it securely.
+</Accordion>
+
+<Accordion title="Health and Status">
+All health endpoints are public.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Liveness probe -- always returns `200 OK` if the process is running |
+| GET | `/ready` | Readiness probe -- returns `200 OK` only if Postgres and Redpanda are reachable, `503` otherwise |
+| GET | `/api/v1/dashboard` | Dashboard aggregate stats (authenticated, cached 30s TTL) |
+| GET | `/metrics` | Prometheus metrics endpoint |
+
+### GET /ready
+
+**Response (healthy):** `200 OK`
+
+```json
+{
+  "status": "ok",
+  "postgres": "connected",
+  "redpanda": "connected"
+}
+```
+
+**Response (degraded):** `503 Service Unavailable`
+
+```json
+{
+  "status": "degraded",
+  "postgres": "connected",
+  "redpanda": "disconnected"
+}
+```
+
+### GET /api/v1/dashboard
+
+Returns aggregate statistics for the dashboard. Requires authentication. Cached with a 30-second TTL.
+
+**Response:**
+
+```json
+{
+  "monitors": { "total": 25, "healthy": 22, "late": 1, "down": 1, "paused": 1 },
+  "incidents": { "open": 1, "acknowledged": 0, "recentlyResolved": 3 },
+  "pings": { "last24h": 1440, "last7d": 10080 }
+}
+```
+</Accordion>
+
+<Accordion title="Status Pages (Public)">
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| GET | `/status/:teamSlug` | **Public** | Status page data for a team |
+
+No authentication required. See [Status Pages](/docs/status-pages) for response format.
+</Accordion>
+</Accordions>
+
+---
+
+## Error Format
+
+All errors follow a consistent JSON format:
+
+```json
+{
+  "statusCode": 404,
+  "message": "Monitor not found",
+  "error": "Not Found"
+}
+```
+
+Common error codes:
+
+| Status | Meaning |
+|--------|---------|
+| `400 Bad Request` | Invalid request body or query parameters |
+| `401 Unauthorized` | Missing or invalid API key / session |
+| `404 Not Found` | Resource does not exist |
+| `429 Too Many Requests` | Rate limit exceeded |
+| `500 Internal Server Error` | Unexpected server error |
+
+---
+
+## Prometheus Metrics
+
+The `/metrics` endpoint exposes metrics in Prometheus exposition format.
+
+### Custom Kast Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `kast_ping_events_total` | Counter | `type` (start, success, fail, log) | Total ping events received |
+| `kast_incidents_opened_total` | Counter | -- | Total incidents opened |
+| `kast_alert_deliveries_total` | Counter | `channel`, `status` (delivered, failed) | Total alert delivery attempts |
+| `kast_http_request_duration_seconds` | Histogram | `method`, `path`, `status_code` | HTTP request latency distribution |
+
+### Default Node.js Metrics
+
+The endpoint also exposes standard Node.js process metrics:
+
+- `process_cpu_seconds_total` -- CPU time consumed
+- `process_resident_memory_bytes` -- Memory usage
+- `nodejs_heap_size_total_bytes` -- V8 heap size
+- `nodejs_heap_size_used_bytes` -- V8 heap usage
+- `nodejs_eventloop_lag_seconds` -- Event loop lag
+- `nodejs_active_handles_total` -- Active handles
+- `nodejs_gc_duration_seconds` -- GC pause duration
+
+Use these for capacity planning and performance monitoring of the Kast API itself.

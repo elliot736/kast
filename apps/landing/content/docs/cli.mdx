@@ -1,0 +1,420 @@
+---
+title: CLI Reference
+description: Complete reference for the Kast CLI covering monitor management, incident handling, teams, API keys, ping sending, and the kast wrap command for automatic job monitoring.
+---
+
+
+The Kast CLI lets you manage monitors, view incidents, send pings, and wrap commands with monitoring -- all from the terminal.
+
+## Installation
+
+<Tabs items={["npm", "Monorepo"]}>
+<Tab value="npm">
+```bash
+pnpm add -g @kast/cli
+```
+</Tab>
+
+<Tab value="Monorepo">
+```bash
+cd packages/cli
+pnpm build
+pnpm link --global
+```
+</Tab>
+</Tabs>
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `KAST_API_URL` | `http://localhost:3001` | Base URL of the Kast API |
+| `KAST_API_KEY` | -- | API key for authenticated requests (prefix: `kst_`) |
+
+```bash
+export KAST_API_URL=https://kast.example.com
+export KAST_API_KEY=kst_your_key_here
+```
+
+Both can be overridden per-command with `--api-url` and `--api-key` flags.
+
+## Commands
+
+### `kast health`
+
+Check the health of the Kast API and its dependencies.
+
+```bash
+kast health
+```
+
+```
+API:       http://localhost:3001  OK
+Postgres:  connected              OK
+Redpanda:  connected              OK
+```
+
+Returns a non-zero exit code if any dependency is unreachable.
+
+### `kast api-keys create`
+
+Create a new API key.
+
+```bash
+kast api-keys create --label "deploy-bot"
+```
+
+```
+ID:    550e8400-e29b-41d4-a716-446655440000
+Label: deploy-bot
+Key:   kst_abc123...
+```
+
+Save the key immediately. It is shown only once.
+
+### `kast api-keys list`
+
+List all API keys (keys are masked).
+
+```bash
+kast api-keys list
+```
+
+```
+ID                                    Label        Created
+550e8400-e29b-41d4-a716-446655440000  deploy-bot   2026-03-24
+a1b2c3d4-e5f6-7890-abcd-ef1234567890  my-app       2026-03-20
+```
+
+### `kast monitors list`
+
+List all monitors. Supports filtering by status and tag.
+
+```bash
+kast monitors list
+kast monitors list --status down
+kast monitors list --tag infrastructure
+```
+
+```
+ID          Name           Status    Next Expected         Tags
+abc123...   DB Backup      healthy   2026-03-25T03:00:00Z  infrastructure, backup
+def456...   Queue Worker   down      2026-03-24T12:10:00Z  production
+```
+
+### `kast monitors get <id>`
+
+Get detailed information for a specific monitor.
+
+```bash
+kast monitors get 550e8400-e29b-41d4-a716-446655440000
+```
+
+```
+Name:              DB Backup
+Slug:              db-backup
+Status:            healthy
+Schedule:          0 3 * * *
+Grace:             600s
+Max Runtime:       3600s
+Next Expected:     2026-03-25T03:00:00Z
+Last Ping:         2026-03-24T03:00:15Z
+Ping UUID:         abc123-def456-...
+Tags:              infrastructure, backup
+Team:              Platform Team
+Consecutive Fails: 0
+```
+
+### `kast monitors create`
+
+Create a new monitor interactively or with flags.
+
+```bash
+kast monitors create \
+  --name "DB Backup" \
+  --slug db-backup \
+  --schedule "0 3 * * *" \
+  --grace 600 \
+  --max-runtime 3600 \
+  --tag infrastructure \
+  --tag backup \
+  --team TEAM_UUID
+```
+
+### `kast monitors delete <id>`
+
+Delete a monitor and all associated data.
+
+```bash
+kast monitors delete 550e8400-e29b-41d4-a716-446655440000
+```
+
+### `kast monitors pause <id>`
+
+Pause a monitor to suppress evaluations and alerts during maintenance.
+
+```bash
+kast monitors pause 550e8400-e29b-41d4-a716-446655440000
+```
+
+### `kast monitors resume <id>`
+
+Resume a paused monitor.
+
+```bash
+kast monitors resume 550e8400-e29b-41d4-a716-446655440000
+```
+
+### `kast incidents list`
+
+List incidents with optional status filter.
+
+```bash
+kast incidents list
+kast incidents list --status open
+kast incidents list --status acknowledged
+kast incidents list --status resolved
+```
+
+```
+ID          Monitor       Status   Reason         Opened
+abc123...   DB Backup     open     Ping missed    2026-03-24T03:10:00Z
+def456...   Queue Worker  acked    Max runtime    2026-03-24T12:15:00Z
+```
+
+### `kast incidents ack <id>`
+
+Acknowledge an open incident.
+
+```bash
+kast incidents ack 550e8400-e29b-41d4-a716-446655440000
+```
+
+Acknowledging does not resolve the incident -- it signals that someone is investigating. The monitor remains in `down` until a success ping is received.
+
+### `kast teams list`
+
+List all teams.
+
+```bash
+kast teams list
+```
+
+```
+ID          Name             Slug        Monitors
+abc123...   Platform Team    platform    5
+def456...   Data Team        data        3
+```
+
+### `kast teams create`
+
+Create a new team.
+
+```bash
+kast teams create --name "Platform Team" --slug platform
+```
+
+### `kast apply`
+
+Declaratively manage your Kast configuration from a YAML file. Reconciles teams, monitors, jobs, and workflows against the API, creating or updating resources as needed.
+
+```bash
+kast apply -f kast.yaml
+```
+
+#### Configuration File
+
+```yaml
+version: "1"
+
+teams:
+  platform:
+    name: Platform Team
+
+monitors:
+  db-backup:
+    name: DB Backup
+    schedule: "0 3 * * *"
+    graceSeconds: 600
+    maxRuntimeSeconds: 3600
+    tags: [infrastructure, backup]
+    team: platform
+
+jobs:
+  nightly-etl:
+    name: Nightly ETL
+    schedule: "0 2 * * *"
+    timezone: America/New_York
+    tags: [data]
+    team: platform
+    retry:
+      maxRetries: 3
+      delaySeconds: 60
+      backoffMultiplier: 2
+    concurrency:
+      limit: 1
+      policy: skip
+    workflow:
+      nodes:
+        - id: extract
+          name: Extract Data
+          type: run
+          config:
+            url: https://api.example.com/extract
+            method: POST
+        - id: check
+          name: Check Result
+          type: condition
+          config:
+            expression: "context.extract.status == 200"
+        - id: transform
+          name: Transform
+          type: run
+          config:
+            url: https://api.example.com/transform
+            method: POST
+      edges:
+        - source: extract
+          target: check
+        - source: check
+          sourceHandle: "true"
+          target: transform
+```
+
+Resources are matched by slug. Existing resources are updated; missing resources are created. The reconciler resolves `team` and `monitor` references by slug.
+
+<Callout type="info">
+`kast apply` performs a dry-run diff before making changes. Review the plan and confirm to apply. Use `--yes` to skip confirmation in CI/CD pipelines.
+</Callout>
+
+### `kast ping <uuid> [type]`
+
+Send a ping to a monitor. The default type is `success`.
+
+```bash
+# Success ping (default)
+kast ping abc123-def456
+
+# Start ping
+kast ping abc123-def456 start
+
+# Fail ping
+kast ping abc123-def456 fail
+
+# With body
+kast ping abc123-def456 fail --body "Connection refused"
+```
+
+### `kast wrap -m <uuid> -- <command>`
+
+The killer feature. Wraps any shell command with automatic start/success/fail pings and captures stdout/stderr.
+
+```bash
+kast wrap -m abc123-def456 -- ./backup.sh
+kast wrap -m abc123-def456 -- pg_dump mydb > backup.sql
+kast wrap -m abc123-def456 -- python etl_pipeline.py
+```
+
+<Callout type="info">
+`kast wrap` sends `/start` before the command, spawns the process as a child, captures stdout and stderr, then sends `/success` on exit code 0 or `/fail` with stderr as the body on non-zero exit. It also sends captured output via `/log`. The original exit code is passed through so cron, CI, and other wrappers see the real result. A ping failure (e.g., Kast API unreachable) does not change the exit code.
+</Callout>
+
+#### Crontab Example
+
+Replace manual curl calls with a single `kast wrap` line:
+
+```bash
+# Before: manual curl with error handling
+0 3 * * * curl -fsS -X POST http://localhost:3001/ping/UUID/start && \
+  /usr/local/bin/backup.sh && \
+  curl -fsS -X POST http://localhost:3001/ping/UUID/success || \
+  curl -fsS -X POST http://localhost:3001/ping/UUID/fail
+
+# After: one line, full observability
+0 3 * * * kast wrap -m UUID -- /usr/local/bin/backup.sh
+```
+
+#### Exit Code Passthrough
+
+`kast wrap` exits with the same exit code as the wrapped command. This means:
+
+- If `backup.sh` exits with code 0, `kast wrap` exits with code 0.
+- If `backup.sh` exits with code 1, `kast wrap` exits with code 1.
+- Cron, CI pipelines, and other orchestrators see the real result.
+- A ping failure (e.g., Kast API unreachable) does not change the exit code.
+
+## Global Flags
+
+| Flag | Description |
+|------|-------------|
+| `--api-url <url>` | Override `KAST_API_URL` for this command |
+| `--api-key <key>` | Override `KAST_API_KEY` for this command |
+| `--json` | Output raw JSON instead of formatted tables |
+
+The `--json` flag is useful for scripting and piping output to `jq`:
+
+```bash
+kast monitors list --json | jq '.[] | select(.status == "down")'
+```
+
+## Table Output Format
+
+By default, CLI output is formatted as human-readable tables with aligned columns. Use `--json` for machine-readable output. All list commands support both formats.
+
+## Complete Workflow Example
+
+<Steps>
+<Step>
+### Set up environment
+
+```bash
+export KAST_API_URL=https://kast.example.com
+export KAST_API_KEY=kst_your_key_here
+```
+</Step>
+
+<Step>
+### Create a team
+
+```bash
+kast teams create --name "Data Team" --slug data
+```
+</Step>
+
+<Step>
+### Create a monitor
+
+```bash
+kast monitors create \
+  --name "ETL Pipeline" \
+  --slug etl \
+  --schedule "0 */6 * * *" \
+  --grace 600 \
+  --max-runtime 7200 \
+  --tag production \
+  --tag data
+```
+
+Copy the ping UUID from the output, then add to crontab:
+
+```bash
+0 */6 * * * kast wrap -m PING_UUID -- python run_etl.py
+```
+</Step>
+
+<Step>
+### Monitor and manage
+
+```bash
+# Check status
+kast monitors list --status down
+kast incidents list --status open
+
+# Acknowledge an incident
+kast incidents ack INCIDENT_ID
+
+# Check API health
+kast health
+```
+</Step>
+</Steps>

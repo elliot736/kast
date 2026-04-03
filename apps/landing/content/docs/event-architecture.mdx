@@ -1,0 +1,362 @@
+---
+title: Event Architecture
+description: How Kast uses Redpanda for event-driven monitoring with 14 topics, 19 consumer groups, log compaction, partitioning, and dead letter queues.
+---
+
+
+Kast is built on an event-driven architecture powered by Redpanda (Kafka-compatible). Every ping, state transition, incident, and alert is a durable event in a distributed log. PostgreSQL is a derived projection -- if you lose it, replay the log and reconstruct state.
+
+## Topic Architecture
+
+<ImageZoom src="/diagrams/topics.png" width={1693} height={521} alt="All 14 Redpanda topics with their producers and consumers" />
+
+Kast uses 14 Redpanda topics across three pipelines: monitoring, job execution, and workflows. Each has a specific role, retention policy, partition count, and set of producers and consumers.
+
+## End-to-End Data Flow
+
+<ImageZoom src="/diagrams/dataflow.png" width={870} height={1048} alt="Ping event data flow from HTTP ingestion through schedule evaluation, incident management, and alert dispatch" />
+
+A ping enters via HTTP, is published to `ping-events`, and cascades through the topic graph. Each stage reads from one topic and writes to the next, forming a directed acyclic graph of event processors.
+
+## Event Sourcing Philosophy
+
+<Callout type="info">
+Redpanda is the **source of truth**. PostgreSQL is a derived projection optimized for queries. Every state change is recorded as an immutable event. The database can be rebuilt by replaying the event log. Adding a new integration (metrics exporter, webhook forwarder) means adding a new consumer group -- no changes to existing services. You can seek to any timestamp and replay events to reconstruct what happened at that point in time. Auditability is built in -- you can trace exactly why an incident was opened by reading the event log.
+</Callout>
+
+## All 14 Topics
+
+### Monitoring Pipeline
+
+<Accordions>
+<Accordion title="ping-events">
+| Property | Value |
+|----------|-------|
+| Key | Monitor UUID |
+| Partitions | 6 |
+| Retention | 7 days |
+| Cleanup policy | delete |
+| Producers | Ping Controller (HTTP ping ingestion) |
+| Consumers | Schedule Service, Incident Service, Sink Module, WebSocket Gateway |
+
+Every HTTP ping produces a `PingEvent` containing: monitor ID, ping type (`start`, `success`, `fail`, `log`), timestamp, source IP, user agent, and optional body (up to 64 KB). This is the raw source-of-truth log for all job activity.
+</Accordion>
+
+<Accordion title="monitor-state (compacted)">
+| Property | Value |
+|----------|-------|
+| Key | Monitor UUID |
+| Partitions | 6 |
+| Retention | Infinite (compacted) |
+| Cleanup policy | compact |
+| Producers | Schedule Service |
+| Consumers | Incident Service, WebSocket Gateway, Status Page endpoint |
+
+A compacted topic keyed by monitor UUID. Each message represents the latest known state: `healthy`, `late`, or `down`, along with last ping time, next expected time, and consecutive failure count.
+
+Because the topic is compacted, consumers always get the current state for every monitor on startup without replaying history. This enables **instant recovery on restart** -- when the API starts, it reads the compacted `monitor-state` topic and has the current state of every monitor in memory within seconds.
+</Accordion>
+
+<Accordion title="monitor-evaluations">
+| Property | Value |
+|----------|-------|
+| Key | Monitor UUID |
+| Partitions | 6 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Schedule Service (sweep cycle) |
+| Consumers | Incident Service |
+
+Produced by the schedule service when the 60-second sweep detects a late or missed ping. Each evaluation includes: monitor ID, result (`late`, `missed`, `failed`), expected time, actual time, and reason. The incident service consumes these to decide whether to open or escalate incidents.
+</Accordion>
+
+<Accordion title="alert-triggers">
+| Property | Value |
+|----------|-------|
+| Key | Monitor UUID |
+| Partitions | 3 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Incident Service |
+| Consumers | Notify Service |
+
+Produced when an incident is opened or escalated. Contains the monitor ID, incident ID, alert config references, and all data needed to render alert messages. The notify service consumes these and dispatches alerts to the configured channels.
+</Accordion>
+
+<Accordion title="incident-events">
+| Property | Value |
+|----------|-------|
+| Key | Incident UUID |
+| Partitions | 6 |
+| Retention | 7 days |
+| Cleanup policy | delete |
+| Producers | Incident Service |
+| Consumers | Sink Module, WebSocket Gateway |
+
+Lifecycle events for incidents: `opened`, `acknowledged`, `resolved`. Consumed by the WebSocket gateway for real-time dashboard updates and by the sink for PostgreSQL projection.
+</Accordion>
+
+<Accordion title="alert-retries">
+| Property | Value |
+|----------|-------|
+| Key | Alert delivery UUID |
+| Partitions | 3 |
+| Retention | 1 day |
+| Cleanup policy | delete |
+| Producers | Notify Service (on delivery failure) |
+| Consumers | Notify Service (retry consumer group) |
+
+Failed alert deliveries are re-published here with a `retryAfter` timestamp and incremented attempt count. The notify service retry consumer polls this topic and retries when the scheduled time arrives. See [Alerts](/docs/alerts) for the full retry schedule.
+</Accordion>
+
+<Accordion title="alert-deadletter">
+| Property | Value |
+|----------|-------|
+| Key | Alert delivery UUID |
+| Partitions | 1 |
+| Retention | 30 days |
+| Cleanup policy | delete |
+| Producers | Notify Service (after exhausting all retry attempts) |
+| Consumers | Dead Letter API endpoint |
+
+Alerts that failed all 5 retry attempts land here. Retained for 30 days. Surfaced in the dashboard dead letter page and available for one-click retry via the API.
+</Accordion>
+### Job Execution Pipeline
+
+<Accordion title="job-triggers">
+| Property | Value |
+|----------|-------|
+| Key | Job UUID |
+| Partitions | 6 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Cron Scheduler, Manual Trigger endpoint |
+| Consumers | Job Executor |
+
+Produced when a job should execute -- either from the cron scheduler or a manual trigger. The Job Executor consumes these and delegates to the workflow engine.
+</Accordion>
+
+<Accordion title="job-results">
+| Property | Value |
+|----------|-------|
+| Key | Job UUID |
+| Partitions | 6 |
+| Retention | 7 days |
+| Cleanup policy | delete |
+| Producers | Job Executor |
+| Consumers | Job Bridge (DB sink), WebSocket Gateway |
+
+Published when a job run completes (success, failure, timeout). The Job Bridge writes the result to PostgreSQL and optionally synthesizes a ping event for monitor bridging.
+</Accordion>
+
+<Accordion title="job-retry-scheduled">
+| Property | Value |
+|----------|-------|
+| Key | Job UUID |
+| Partitions | 3 |
+| Retention | 1 day |
+| Cleanup policy | delete |
+| Producers | Job Executor (on run failure when retries remain) |
+| Consumers | Job Retry Service |
+
+Failed runs with remaining retries are scheduled here with a `retryAfter` timestamp. The retry service publishes back to `job-triggers` when the scheduled time arrives.
+</Accordion>
+
+<Accordion title="job-run-logs">
+| Property | Value |
+|----------|-------|
+| Key | Run UUID |
+| Partitions | 3 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Job Executor, Workflow Engine |
+| Consumers | Job Log Sink, WebSocket Gateway |
+
+Structured log events emitted during job and workflow execution. The log sink batches these to PostgreSQL. The WebSocket gateway streams them to the dashboard in real-time.
+</Accordion>
+
+### Workflow Pipeline
+
+<Accordion title="workflow-resume">
+| Property | Value |
+|----------|-------|
+| Key | Workflow Run UUID |
+| Partitions | 6 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Job Executor, Workflow Sleeper, Workflow Signal Delivery |
+| Consumers | Workflow Engine |
+
+The main trigger topic for the workflow engine. Published when a workflow needs to advance: initial start, wake from sleep, signal received, or step completed. The engine replays completed steps from the database and executes the next node in the DAG frontier.
+</Accordion>
+
+<Accordion title="workflow-step-results">
+| Property | Value |
+|----------|-------|
+| Key | Workflow Run UUID |
+| Partitions | 6 |
+| Retention | 3 days |
+| Cleanup policy | delete |
+| Producers | Workflow Engine |
+| Consumers | WebSocket Gateway |
+
+Published when a workflow step completes, fails, or is skipped. Step results are also persisted to the `workflow_step_results` table for replay-based memoization. The WebSocket gateway uses these for real-time canvas visualization.
+</Accordion>
+
+<Accordion title="workflow-signals">
+| Property | Value |
+|----------|-------|
+| Key | Target Run UUID |
+| Partitions | 6 |
+| Retention | 7 days |
+| Cleanup policy | delete |
+| Producers | Workflow Engine (from run_job steps), External API |
+| Consumers | Workflow Signal Delivery Service |
+
+Carries signals between workflows. The signal delivery service writes signals to the `workflow_signal` database table and publishes a `workflow-resume` event to wake the target workflow. The database table prevents race conditions when a signal arrives before the target workflow reaches its wait step.
+</Accordion>
+</Accordions>
+
+## Consumer Groups
+
+Each service uses a dedicated consumer group, so services process events independently and at their own pace.
+
+### Monitoring
+
+| Consumer Group | Subscribes To | Purpose |
+|---------------|---------------|---------|
+| `kast-scheduler` | `ping-events` | Recalculates `nextExpectedAt` and publishes state updates |
+| `kast-incidents` | `monitor-evaluations` | Opens, escalates, and resolves incidents |
+| `kast-incidents-pings` | `ping-events` | Resolves incidents on success ping (fast path) |
+| `kast-notify` | `alert-triggers` | Dispatches alert notifications to channels |
+| `kast-notify-retries` | `alert-retries` | Retries failed alert deliveries on schedule |
+| `kast-sink` | `ping-events` | Projects ping events to PostgreSQL |
+| `kast-sink-incidents` | `incident-events` | Projects incident events to PostgreSQL |
+| `kast-sink-alerts` | `alert-triggers` | Projects alert delivery records to PostgreSQL |
+
+### Job Execution
+
+| Consumer Group | Subscribes To | Purpose |
+|---------------|---------------|---------|
+| `kast-job-executor` | `job-triggers` | Executes jobs by delegating to workflow engine |
+| `kast-job-sink` | `job-results` | Projects job run results to PostgreSQL |
+| `kast-job-bridge` | `job-results` | Synthesizes ping events for monitor bridging |
+| `kast-job-retry` | `job-retry-scheduled` | Re-publishes failed runs to `job-triggers` on schedule |
+| `kast-job-log-sink` | `job-run-logs` | Batches execution logs to PostgreSQL |
+
+### Workflows
+
+| Consumer Group | Subscribes To | Purpose |
+|---------------|---------------|---------|
+| `kast-workflow-engine` | `workflow-resume` | Replays and advances workflow DAG execution |
+| `kast-workflow-sleeper` | `workflow-resume` | Manages sleep timers and re-publishes resume events |
+| `kast-workflow-signal-delivery` | `workflow-signals` | Buffers signals to DB and resumes target workflows |
+
+### WebSocket
+
+| Consumer Group | Subscribes To | Purpose |
+|---------------|---------------|---------|
+| `kast-ws-*` | various | Streams events to WebSocket clients for real-time dashboard updates |
+
+## Log Compaction for monitor-state
+
+The `monitor-state` topic uses Kafka log compaction (`cleanup.policy: compact`). Redpanda retains only the latest message per key (monitor UUID), discarding older versions during compaction cycles.
+
+This provides:
+
+- **Instant recovery on restart.** Read the entire compacted topic on startup to hydrate the in-memory state for all monitors. No need to replay `ping-events` from the beginning.
+- **Constant-size topic.** The topic size is proportional to the number of monitors, not the number of events over time.
+- **Fast consumer initialization.** New consumers (including the WebSocket gateway on connection) can read current state in one pass.
+
+## Partitioning by Monitor UUID
+
+All topics that carry monitor-specific data are keyed by monitor UUID. This guarantees:
+
+- **Strict ordering per monitor.** All events for a given monitor land in the same partition and are processed in order.
+- **Parallel processing across monitors.** Different monitors can be processed concurrently by different consumer group members.
+- **Predictable partition assignment.** Adding API replicas rebalances partitions across consumers without losing ordering guarantees.
+
+## Tiered Data Lifecycle
+
+| Tier | Storage | Retention | Access Pattern |
+|------|---------|-----------|---------------|
+| Hot | Redpanda topics | 1-30 days (per topic) | Real-time streaming, event processing |
+| Warm | PostgreSQL | `PING_RETENTION_DAYS` (default 30) | API queries, dashboard, replay |
+| Cold | Redpanda `monitor-state` (compacted) | Infinite | State recovery on restart |
+
+Redpanda handles recent events for streaming and processing. PostgreSQL handles long-term queryable storage. The compacted `monitor-state` topic serves as a persistent snapshot that survives Redpanda retention cleanup on the other topics.
+
+## Dead Letter Topics
+
+When an alert delivery fails all 5 retry attempts, it is published to `alert-deadletter`. This topic is:
+
+- Retained for 30 days.
+- Exposed via `GET /api/v1/dead-letters` for inspection.
+- Supports one-click retry via `POST /api/v1/dead-letters/:id/retry`.
+- Surfaced in the dashboard dead letter page with delivery attempt history and error messages.
+
+## Batch Processing in SinkModule
+
+The Sink Module writes events to PostgreSQL in batches for performance:
+
+- **Buffer size:** 50 events
+- **Flush interval:** 200ms
+
+Whichever threshold is hit first triggers a batch INSERT. This means a single ping event reaches PostgreSQL within 200ms in the worst case, or immediately if 50 events are buffered (high-throughput scenario).
+
+### In-Memory Duration Tracking
+
+The Sink Module maintains an in-memory `Map<string, Date>` that tracks `start` ping timestamps keyed by monitor ID. When a `success` ping arrives, the Sink looks up the corresponding `start` timestamp in the map, calculates the duration, and writes it to the ping record in PostgreSQL. This avoids a database round-trip to look up the start time.
+
+The map is bounded by the number of active monitors, not the number of events, so memory usage is predictable. If the process restarts, in-flight durations for pings that received a `start` but not yet a `success` are lost -- the next `success` ping will simply have no duration recorded. This is an acceptable trade-off for avoiding database reads on the hot path.
+
+## Graceful Shutdown
+
+Kast enables NestJS shutdown hooks with `app.enableShutdownHooks()` at bootstrap. On SIGTERM or SIGINT:
+
+1. All consumer groups commit their current offsets to Redpanda via `consumer.commitOffsets()` before calling `consumer.disconnect()`.
+2. In-flight batch buffers in the Sink Module are flushed to PostgreSQL.
+3. WebSocket connections are closed.
+4. The process exits.
+
+This ensures no events are lost or double-processed on restart. Consumer groups resume from their last committed offset. The `enableShutdownHooks` call is critical -- without it, NestJS does not intercept process signals, and consumers would disconnect without committing offsets, causing duplicate processing on the next startup.
+
+## Consumer Tuning
+
+All KafkaJS consumer instances share a common configuration tuned for Kast's workload:
+
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| `sessionTimeout` | 30,000 ms (30s) | Maximum time between heartbeats before the broker considers the consumer dead and triggers a rebalance. Set higher than the default 10s to tolerate GC pauses and Sink batch flushes. |
+| `heartbeatInterval` | 3,000 ms (3s) | Frequency of heartbeat messages to the broker. Standard rule of thumb: one-third of session timeout. |
+| `retry` | 10 | Number of retries for transient broker errors (connection drops, leader elections) before the consumer crashes. Higher than the default to survive Redpanda rolling restarts. |
+
+These values are configured in each consumer registration:
+
+```typescript
+{
+  groupId: 'kast-sink',
+  sessionTimeout: 30000,
+  heartbeatInterval: 3000,
+  retry: { retries: 10 },
+}
+```
+
+If you run multiple API replicas, consumer groups automatically rebalance partitions across instances. The `sessionTimeout` value determines how quickly a dead replica's partitions are reassigned -- 30 seconds means at most 30 seconds of processing delay after a replica crashes.
+
+## KafkaJS Partitioner Warning
+
+KafkaJS v2 changed the default partitioner and logs a warning on startup if you do not explicitly choose one. Kast suppresses this warning by explicitly configuring the legacy partitioner:
+
+```typescript
+import { Partitioners } from 'kafkajs';
+
+const kafka = new Kafka({
+  // ...
+  producer: {
+    createPartitioner: Partitioners.LegacyPartitioner,
+  },
+});
+```
+
+The legacy partitioner uses the same algorithm as the Java Kafka client, ensuring consistent partition assignment when keys (monitor UUIDs) are used. This is important because all topics are keyed by monitor UUID -- changing the partitioner would break ordering guarantees for existing monitors.

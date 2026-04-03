@@ -1,0 +1,216 @@
+---
+title: Authentication
+description: Dual authentication with API keys for programmatic access and session cookies for the dashboard, powered by better-auth with a unified guard flow.
+---
+
+
+Kast uses dual authentication: **API keys** for programmatic access (jobs, CLI, CI/CD pipelines) and **session cookies** for the dashboard (browser). Both are enforced by a single unified guard that runs on every protected endpoint.
+
+<ImageZoom src="/diagrams/auth.png" width={926} height={994} alt="Authentication flow showing API key and session cookie paths through the UnifiedAuthGuard" />
+
+## better-auth Integration
+
+The dashboard uses [better-auth](https://www.better-auth.com/) for session-based authentication. Kast configures better-auth with the **email + password** provider. All auth endpoints are mounted at `/api/auth/*` and handled by better-auth directly.
+
+### Signup
+
+```bash
+curl -X POST http://localhost:3001/api/auth/sign-up/email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Alice",
+    "email": "alice@example.com",
+    "password": "a-strong-password"
+  }'
+```
+
+### Login
+
+```bash
+curl -X POST http://localhost:3001/api/auth/sign-in/email \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "email": "alice@example.com",
+    "password": "a-strong-password"
+  }'
+```
+
+On success, better-auth sets an `httpOnly` session cookie. The dashboard sends this cookie automatically on every request.
+
+## Dual Authentication Model
+
+| Method | Transport | Use case | Lifetime |
+|--------|-----------|----------|----------|
+| **API key** | `x-api-key` header | Jobs, CLI, CI/CD, scripts | Until revoked |
+| **Session cookie** | Cookie header | Dashboard (browser) | Session-based, 5-min cache |
+
+API keys are designed for non-interactive, programmatic access. Session cookies are for humans using the dashboard in a browser. Both grant full access to the API -- there is no privilege difference between them.
+
+## Authentication Examples
+
+<Tabs items={["API Key Auth", "Session Auth"]}>
+<Tab value="API Key Auth">
+Use the `x-api-key` header for programmatic access from scripts, CI/CD pipelines, and the CLI.
+
+```bash
+# List monitors with API key
+curl http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Create a monitor with API key
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "My Job", "slug": "my-job", "schedule": "0 * * * *"}'
+```
+
+API keys use the `kst_` prefix followed by a cryptographically random string. The raw key is shown once at creation time. Kast stores only the **SHA-256 hash** in PostgreSQL.
+</Tab>
+
+<Tab value="Session Auth">
+Session authentication is used by the dashboard in the browser. After logging in via better-auth, an `httpOnly` session cookie is set.
+
+```bash
+# Login to get a session cookie
+curl -X POST http://localhost:3001/api/auth/sign-in/email \
+  -H 'Content-Type: application/json' \
+  -c cookies.txt \
+  -d '{"email": "alice@example.com", "password": "a-strong-password"}'
+
+# Use the session cookie for subsequent requests
+curl http://localhost:3001/api/v1/monitors \
+  -b cookies.txt
+```
+
+Session validation results are cached in memory for 5 minutes to reduce database round-trips.
+</Tab>
+</Tabs>
+
+## UnifiedAuthGuard Flow
+
+Every protected request passes through the `UnifiedAuthGuard`. The guard checks credentials in a strict order:
+
+1. **Check `x-api-key` header.** If present, hash the key with SHA-256 and look it up in the database. Use timing-safe comparison to prevent timing attacks. If valid, attach the associated team to the request and allow.
+2. **Check session cookie.** If no API key header is present, call better-auth to validate the session cookie. If valid, look up the user's team and attach it to the request. Session lookups are cached for 5 minutes to reduce database calls.
+3. **Reject.** If neither credential is valid, return `401 Unauthorized`.
+
+```
+Request
+  │
+  ├─ x-api-key header present?
+  │   ├─ YES → SHA-256 hash → DB lookup (timing-safe) → team attached → ALLOW
+  │   └─ NO  ↓
+  │
+  ├─ Session cookie present?
+  │   ├─ YES → better-auth validate → user lookup → team attached → ALLOW
+  │   └─ NO  ↓
+  │
+  └─ REJECT (401 Unauthorized)
+```
+
+## API Keys
+
+### Format
+
+API keys use the `kst_` prefix followed by a cryptographically random string:
+
+```
+kst_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+```
+
+The raw key is shown once at creation time. Kast stores only the **SHA-256 hash** of the key in PostgreSQL. If you lose the raw key, you must create a new one.
+
+### Timing-Safe Comparison
+
+Key validation uses Node.js `crypto.timingSafeEqual()` to compare the SHA-256 hash of the submitted key against the stored hash. This prevents timing attacks that could leak valid key hashes by measuring response times.
+
+### Creating the First API Key (Bootstrap)
+
+The `POST /api/v1/api-keys` endpoint is **public when no API keys exist** for any team. This allows bootstrapping the first key without a chicken-and-egg authentication problem.
+
+```bash
+# First key creation -- no authentication required
+curl -X POST http://localhost:3001/api/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{ "name": "bootstrap-key" }'
+```
+
+The response includes the raw key exactly once:
+
+```json
+{
+  "id": "uuid",
+  "name": "bootstrap-key",
+  "key": "kst_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6",
+  "createdAt": "2026-01-15T10:00:00Z"
+}
+```
+
+After the first key exists, all subsequent `POST /api/v1/api-keys` requests require authentication.
+
+### Managing API Keys
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/v1/api-keys` | `GET` | List all API keys (hashed, never raw) |
+| `/api/v1/api-keys` | `POST` | Create a new API key |
+| `/api/v1/api-keys/:id` | `DELETE` | Revoke an API key |
+
+## Session Management
+
+Sessions are managed by better-auth with the following characteristics:
+
+- **Cookie-based.** Sessions are stored in an `httpOnly`, `Secure` (in production), `SameSite=Lax` cookie.
+- **5-minute cache.** Session validation results are cached in memory for 5 minutes. This avoids a database round-trip on every request while keeping session invalidation reasonably fast.
+- **No manual token refresh.** better-auth handles session lifecycle internally.
+
+## Public Endpoints
+
+Some endpoints must be accessible without authentication. The `@Public()` decorator marks these endpoints so the `UnifiedAuthGuard` skips them entirely.
+
+| Endpoint | Why public |
+|----------|-----------|
+| `POST /api/v1/monitors/:slug/ping` | Ping ingestion from jobs (authenticated by monitor slug) |
+| `GET /api/v1/status-pages/:slug` | Public status pages |
+| `GET /health` | Liveness probe |
+| `GET /ready` | Readiness probe |
+| `GET /metrics` | Prometheus scrape endpoint |
+| `/api/auth/*` | better-auth login/signup endpoints |
+
+Ping ingestion is "public" in the sense that it does not require an API key or session -- the monitor slug itself serves as the identifier. This keeps the curl command simple for job scripts.
+
+## Security Hardening
+
+<Callout type="warn">
+Never expose API keys in client-side code, public repositories, or logs. Use environment variables to store keys in CI/CD pipelines and server environments. If a key is compromised, revoke it immediately via `DELETE /api/v1/api-keys/:id` and create a new one.
+</Callout>
+
+### Rate Limiting
+
+Ping ingestion is rate-limited to **300 requests per minute per source IP**. This prevents a misconfigured job from flooding the event log. The rate limit is enforced by `@nestjs/throttler` at the controller level.
+
+```
+HTTP 429 Too Many Requests
+{
+  "statusCode": 429,
+  "message": "ThrottlerException: Too Many Requests"
+}
+```
+
+### Request Body Limits
+
+All request bodies are limited to **1 MB**. Ping bodies are further limited to **64 KB** at the application level.
+
+### Trust Proxy
+
+When running behind nginx (as in the Docker Compose deployment), Kast is configured with `app.set('trust proxy', 1)` so that `X-Forwarded-For` headers from the reverse proxy are trusted for rate limiting and logging.
+
+### Correlation IDs
+
+Every request is assigned a correlation ID. If the client sends an `x-request-id` header, it is preserved. Otherwise, a UUID is generated. This ID is:
+
+- Attached to all log entries for the request.
+- Returned in the `x-request-id` response header.
+- Propagated to any events published to Redpanda during the request.
+
+This makes it possible to trace a single ping from HTTP ingestion through event processing to alert delivery by searching logs for the correlation ID.

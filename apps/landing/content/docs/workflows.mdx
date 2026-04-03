@@ -1,0 +1,350 @@
+---
+title: Workflows
+description: Define DAG-based durable workflows with HTTP calls, sleep, conditional branching, child jobs, fan-out, and replay-based execution.
+---
+
+Workflows are DAG-based execution pipelines attached to a job. Each node in the graph can make an HTTP call, sleep for a duration, branch conditionally based on expressions, spawn child jobs, fan out to parallel branches, or wait for an external webhook.
+
+Execution is **durable** -- if a workflow is sleeping or waiting, it survives process restarts. The engine uses replay-based memoization: completed step results are stored in the database, and on resume the engine skips already-completed steps.
+
+## Node Types
+
+| Type | Description |
+|------|-------------|
+| `run` | Make an HTTP request. Configurable method, headers, body, timeout, and success status codes. |
+| `sleep` | Pause for a duration (ISO 8601). The workflow enters `sleeping` state and resumes automatically. |
+| `condition` | Evaluate an expression and branch to different paths based on the result. |
+| `run_job` | Spawn a child job and optionally wait for it to complete. |
+| `fan_out` | Execute downstream branches in parallel with configurable concurrency. |
+| `webhook_wait` | Pause until an external webhook signal is received. Optional timeout. |
+
+## Graph Model
+
+Workflows use a DAG (directed acyclic graph) model with **nodes** and **edges**:
+
+```bash
+curl -X PUT http://localhost:3001/api/v1/jobs/JOB_ID/workflow \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "steps": {
+      "nodes": [
+        {
+          "id": "fetch-data",
+          "name": "Fetch Data",
+          "type": "run",
+          "config": {
+            "url": "https://api.example.com/export",
+            "method": "POST",
+            "timeoutSeconds": 30
+          }
+        },
+        {
+          "id": "check-result",
+          "name": "Check Result",
+          "type": "condition",
+          "config": {
+            "expression": "context.fetch-data.status == 200"
+          }
+        },
+        {
+          "id": "process",
+          "name": "Process Data",
+          "type": "run",
+          "config": {
+            "url": "https://api.example.com/process",
+            "method": "POST"
+          }
+        },
+        {
+          "id": "notify-failure",
+          "name": "Notify Failure",
+          "type": "run",
+          "config": {
+            "url": "https://hooks.slack.com/services/...",
+            "method": "POST",
+            "body": "{\"text\": \"Export failed\"}"
+          }
+        }
+      ],
+      "edges": [
+        { "source": "fetch-data", "target": "check-result" },
+        { "source": "check-result", "sourceHandle": "true", "target": "process" },
+        { "source": "check-result", "sourceHandle": "false", "target": "notify-failure" }
+      ]
+    }
+  }'
+```
+
+When the job is triggered (on schedule or manually), the workflow engine traverses the graph, executing nodes as their incoming edges are satisfied.
+
+### Nodes
+
+Each node has:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Unique identifier within the workflow |
+| `name` | string | No | Display name |
+| `type` | string | Yes | One of: `run`, `sleep`, `condition`, `run_job`, `fan_out`, `webhook_wait` |
+| `config` | object | Yes | Type-specific configuration (see below) |
+| `retryPolicy` | object | No | Per-node retry policy |
+| `onFailure` | string | No | `abort` (default) or `continue` |
+| `position` | object | No | Canvas position `{ x, y }` for the visual editor |
+
+### Edges
+
+Edges connect nodes and control execution flow:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `source` | string | Yes | Source node ID |
+| `target` | string | Yes | Target node ID |
+| `sourceHandle` | string | No | Handle for condition branches: `true` or `false` |
+| `label` | string | No | Display label on the edge |
+| `loop` | object | No | Loop configuration (see [Loops](#loops)) |
+
+## Workflow Versions
+
+Each `PUT` to the workflow endpoint creates a new version. The latest version is used for new runs. In-flight runs continue using the version they started with.
+
+## Node Configuration
+
+### Run
+
+```json
+{
+  "id": "call-api",
+  "name": "Call API",
+  "type": "run",
+  "config": {
+    "url": "https://api.example.com/action",
+    "method": "POST",
+    "headers": { "Authorization": "Bearer token" },
+    "body": "{ \"context\": \"{{context.fetch-data}}\" }",
+    "timeoutSeconds": 30,
+    "successStatusCodes": [200, 201]
+  }
+}
+```
+
+The `body` field supports template interpolation: `{{context.stepId}}` resolves to the output of a previous step.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `url` | string | required | HTTP endpoint to call |
+| `method` | string | required | HTTP method (GET, POST, PUT, PATCH, DELETE) |
+| `headers` | object | `{}` | Custom HTTP headers |
+| `body` | string | -- | Request body with optional template interpolation |
+| `timeoutSeconds` | number | `30` | Request timeout |
+| `successStatusCodes` | number[] | `[200, 201, 202, 204]` | HTTP status codes treated as success |
+
+### Sleep
+
+```json
+{
+  "id": "pause",
+  "name": "Wait 5 minutes",
+  "type": "sleep",
+  "config": { "duration": "PT5M" }
+}
+```
+
+Durations use ISO 8601 format: `PT30S` (30 seconds), `PT5M` (5 minutes), `PT1H` (1 hour), `P1D` (1 day).
+
+The workflow status changes to `sleeping` and the Sleeper Module resumes it when the time expires.
+
+### Condition
+
+```json
+{
+  "id": "check-status",
+  "name": "Is Success?",
+  "type": "condition",
+  "config": {
+    "expression": "context.call-api.status == 200"
+  }
+}
+```
+
+Evaluates the expression and activates either the `true` or `false` outgoing edge. Use `sourceHandle` on edges to specify which branch to follow:
+
+```json
+[
+  { "source": "check-status", "sourceHandle": "true", "target": "continue-step" },
+  { "source": "check-status", "sourceHandle": "false", "target": "error-handler" }
+]
+```
+
+#### Expression Language
+
+The expression evaluator supports:
+
+| Feature | Examples |
+|---------|----------|
+| **Property access** | `context.step-id.status`, `context.step-id.body.count` |
+| **Comparisons** | `==`, `!=`, `>`, `>=`, `<`, `<=` |
+| **Logical operators** | `&&`, `\|\|`, `!` |
+| **Literals** | numbers, strings (`"hello"`), booleans (`true`, `false`), `null` |
+| **Parentheses** | `(a > 1) && (b < 10)` |
+
+Expressions have access to the `context` object which contains the output of all completed steps, keyed by step ID.
+
+### Run Job
+
+```json
+{
+  "id": "spawn-child",
+  "name": "Run ETL",
+  "type": "run_job",
+  "config": {
+    "targetJobId": "uuid-of-child-job",
+    "mode": "wait",
+    "input": { "date": "2026-04-01" }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `targetJobId` | string | UUID of the job to trigger |
+| `mode` | string | `wait` blocks until the child completes; `fire_and_forget` continues immediately |
+| `input` | object | Optional input data passed to the child job |
+
+### Fan Out
+
+Fan-out nodes execute all downstream branches in parallel. Connect multiple edges from a fan-out node to create parallel branches:
+
+```json
+{
+  "id": "parallel",
+  "name": "Sync All Regions",
+  "type": "fan_out",
+  "config": {
+    "concurrency": 3,
+    "failFast": false
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `concurrency` | number | unlimited | Max branches running simultaneously |
+| `failFast` | boolean | `false` | Abort remaining branches on first failure |
+
+### Webhook Wait
+
+```json
+{
+  "id": "wait-approval",
+  "name": "Wait for Approval",
+  "type": "webhook_wait",
+  "config": {
+    "timeoutDuration": "PT1H"
+  }
+}
+```
+
+The workflow pauses until an external signal is received. If `timeoutDuration` is set, the step fails after that duration.
+
+## Loops
+
+Edges can be configured as back-edges to create loops:
+
+```json
+{
+  "source": "check-result",
+  "sourceHandle": "false",
+  "target": "retry-step",
+  "loop": {
+    "maxIterations": 5,
+    "untilExpression": "context.retry-step.status == 200"
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `maxIterations` | number | Maximum loop iterations (1-100) |
+| `untilExpression` | string | Expression that, when true, exits the loop |
+
+The engine tracks loop counters per edge and exits when either `maxIterations` is reached or `untilExpression` evaluates to true.
+
+## Failure Handling
+
+Each node can configure what happens on failure:
+
+| Policy | Behavior |
+|--------|----------|
+| `abort` | Stop the workflow and mark it as failed (default) |
+| `continue` | Skip the failed node and proceed to downstream nodes |
+
+```json
+{
+  "id": "optional-step",
+  "name": "Optional Enrichment",
+  "type": "run",
+  "config": { "url": "https://api.example.com/enrich", "method": "POST" },
+  "onFailure": "continue"
+}
+```
+
+## Node Retry Policies
+
+Individual nodes can have their own retry policy, separate from the job-level retry:
+
+```json
+{
+  "retryPolicy": {
+    "maxAttempts": 3,
+    "delaySeconds": 10,
+    "backoffMultiplier": 2
+  }
+}
+```
+
+## Workflow Run States
+
+| Status | Description |
+|--------|-------------|
+| `running` | Executing a node |
+| `sleeping` | Paused on a sleep node, will resume automatically |
+| `waiting` | Paused on a webhook_wait node |
+| `completed` | All nodes finished successfully |
+| `failed` | A node failed with `onFailure: "abort"` |
+| `cancelled` | Cancelled via API |
+
+## Memoization
+
+Completed step results are stored in the `workflow_step_results` table. When a workflow resumes after sleep, webhook, or process restart, the engine loads existing results and skips completed steps. This makes workflows durable across restarts.
+
+## Frontier Computation
+
+The engine determines which nodes are ready to execute by computing the **frontier** -- nodes whose incoming edges are all satisfied:
+
+- All predecessor nodes must have completed
+- For condition nodes, only the matching branch (true/false) is activated
+- Back-edges (loops) are handled separately with iteration counters
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/jobs/:id/workflow` | Get workflow definition |
+| PUT | `/api/v1/jobs/:id/workflow` | Create or update workflow (new version) |
+| GET | `/api/v1/jobs/:id/runs/:runId/workflow` | Workflow run detail with step results |
+| POST | `/api/v1/jobs/:id/runs/:runId/workflow/cancel` | Cancel a running workflow |
+
+## Dashboard
+
+The workflow canvas in the dashboard provides a visual DAG editor with:
+
+- **Drag-and-drop nodes** on a React Flow canvas
+- **Node type selector** for adding run, sleep, condition, run job, fan out, and webhook wait nodes
+- **Edge drawing** by dragging between node handles
+- **Condition branching** with labeled true/false edges
+- **Auto-layout** button that arranges nodes using dagre, with smart condition branch placement (true branch left, false branch right)
+- **Smoothstep edges** for clean visual connections
+- **Per-node configuration** forms with retry and failure policy settings
+
+The workflow run page shows a live execution visualization with real-time status updates on each node, duration tracking, and condition result indicators.

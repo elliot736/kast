@@ -1,0 +1,296 @@
+---
+title: Your First Monitor
+description: Create and configure monitors with cron or interval schedules, grace periods, max runtime alerting, tags, teams, and pause/resume support.
+---
+
+
+A monitor represents a job you want to track. When the job runs, it sends a ping to Kast. If the ping does not arrive on time, runs too long, or explicitly reports a failure, Kast opens an incident and alerts you.
+
+## Monitor State Machine
+
+Every monitor is always in one of four states. Understanding the transitions is key to configuring monitors correctly.
+
+<ImageZoom src="/diagrams/states.png" width={772} height={594} alt="Monitor state machine showing healthy, late, down, and paused states with transition triggers" />
+
+| State | Meaning |
+|-------|---------|
+| **healthy** | The most recent ping arrived on time. Everything is normal. |
+| **late** | The expected time has passed but the grace period has not yet elapsed. A warning state. |
+| **down** | The grace period has elapsed with no ping, or a `/fail` ping was received, or max runtime was exceeded. An incident is open. |
+| **paused** | Evaluation is suspended. No state transitions occur regardless of ping activity. |
+
+### State Transitions
+
+| From | To | Trigger |
+|------|----|---------|
+| healthy | late | Sweep finds overdue monitor within grace period |
+| late | down | Sweep finds overdue monitor past grace deadline |
+| down | healthy | Success ping received, incident resolves |
+| late | healthy | Success ping received |
+| healthy | paused | Manual pause via API or dashboard |
+| late | paused | Manual pause via API or dashboard |
+| down | paused | Manual pause via API or dashboard |
+| paused | healthy | Resume via API or dashboard |
+
+## Creating a Monitor
+
+<Tabs items={["Create via API", "Create via Dashboard"]}>
+<Tab value="Create via API">
+```bash
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "DB Backup",
+    "slug": "db-backup",
+    "description": "Nightly PostgreSQL backup to S3",
+    "schedule": "0 3 * * *",
+    "graceSeconds": 1800,
+    "maxRuntimeSeconds": 3600,
+    "tags": ["infrastructure", "backup", "production"],
+    "teamId": "YOUR_TEAM_UUID",
+    "logRetentionDays": 90
+  }'
+```
+
+The response includes a `pingUuid` -- this is the unique identifier your job uses to send pings.
+
+```json
+{
+  "id": "uuid",
+  "name": "DB Backup",
+  "slug": "db-backup",
+  "pingUuid": "abc123-def456-...",
+  "status": "healthy",
+  "nextExpectedAt": "2026-03-25T03:00:00.000Z",
+  "createdAt": "2026-03-24T12:00:00.000Z"
+}
+```
+</Tab>
+
+<Tab value="Create via Dashboard">
+1. Open the dashboard at `http://localhost:3000`.
+2. Click **New Monitor** in the top right.
+3. Fill in the name, slug, schedule (cron expression or interval), and grace period.
+4. Optionally add tags, assign a team, and set max runtime.
+5. Click **Create**.
+
+The dashboard displays the `pingUuid` and a ready-to-copy curl command for immediate integration.
+</Tab>
+</Tabs>
+
+## All Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | required | Human-readable name displayed in the dashboard and alerts |
+| `slug` | string | required | URL-safe identifier matching `[a-z0-9-]+` |
+| `description` | string | `null` | Optional description for context |
+| `schedule` | string | `null` | Cron expression (5-field syntax). Mutually exclusive with `intervalSeconds`. |
+| `intervalSeconds` | number | `null` | Fixed interval between expected pings. Mutually exclusive with `schedule`. |
+| `graceSeconds` | number | `300` | Seconds after expected time before transitioning to `down` |
+| `maxRuntimeSeconds` | number | `null` | Maximum allowed duration from `/start` to `/success`. Exceeding triggers `down`. |
+| `tags` | string[] | `[]` | Arbitrary tags stored as a JSONB array with a GIN index for fast filtering |
+| `teamId` | string | `null` | UUID of the team this monitor belongs to. Required for status page inclusion. |
+| `logRetentionDays` | number | `null` | Per-monitor override for ping log retention. Falls back to global `PING_RETENTION_DAYS`. |
+| `isPaused` | boolean | `false` | Whether the monitor is paused |
+
+## Cron Expressions vs Interval-Based Scheduling
+
+### Cron Expressions
+
+Use `schedule` for jobs that run on a fixed calendar schedule. Kast uses standard 5-field cron syntax parsed by `CronExpressionParser` from the `cron-parser` library. All times are UTC.
+
+```
++-------------- minute (0-59)
+| +------------ hour (0-23)
+| | +---------- day of month (1-31)
+| | | +-------- month (1-12)
+| | | | +------ day of week (0-7, 0 and 7 = Sunday)
+| | | | |
+* * * * *
+```
+
+| Example | Meaning |
+|---------|---------|
+| `0 3 * * *` | Every day at 3:00 AM UTC |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 0 * * 0` | Every Sunday at midnight UTC |
+| `30 2 1 * *` | 1st of every month at 2:30 AM UTC |
+| `0 9-17 * * 1-5` | Every hour during business hours, weekdays |
+
+After each successful ping, Kast parses the expression and computes the next expected time.
+
+### Interval-Based
+
+Use `intervalSeconds` for jobs that run on a fixed cadence rather than a calendar schedule. After each successful ping, Kast sets `nextExpectedAt = now + intervalSeconds`.
+
+```bash
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Queue Worker Heartbeat",
+    "slug": "queue-worker",
+    "intervalSeconds": 300
+  }'
+```
+
+You must set `schedule` or `intervalSeconds`, but not both.
+
+## Grace Periods
+
+<Callout type="warn">
+The grace period (`graceSeconds`, default 300) is the buffer between the expected ping time and when Kast marks the monitor as `down`. Set it based on how variable your job's timing is. A nightly backup that usually takes 5-30 minutes might use `graceSeconds: 1800`. A heartbeat expected every 60 seconds might use `graceSeconds: 30`. If the grace period is too short, you will get false alarms from normal timing variation.
+</Callout>
+
+**Example timeline** for a cron job at `0 3 * * *` with `graceSeconds: 1800`:
+
+| Time | Event | Monitor Status |
+|------|-------|---------------|
+| 03:00 | Expected time passes, no ping | healthy (just overdue) |
+| 03:00-03:30 | Grace period active | **late** |
+| 03:30 | Grace period expires | **down**, incident opens |
+| 03:32 | Ping arrives | **healthy**, incident resolves |
+
+## Max Runtime Alerting
+
+If your job sends a `/start` ping when it begins, Kast tracks how long it runs. A separate sweep cycle (`sweepMaxRuntime`) checks every 60 seconds for monitors where:
+
+1. The last ping type was `start` (no subsequent `success` or `fail`).
+2. The elapsed time since the start ping exceeds `maxRuntimeSeconds`.
+
+When exceeded, the monitor transitions to `down` with reason "Max runtime exceeded" and an incident opens.
+
+This catches jobs that hang, stall, or enter infinite loops without explicitly failing.
+
+```bash
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "ETL Pipeline",
+    "slug": "etl-pipeline",
+    "schedule": "0 */6 * * *",
+    "maxRuntimeSeconds": 7200
+  }'
+```
+
+## Tags
+
+Tags are freeform strings stored as a JSONB array with a GIN index for efficient filtering. Use them to organize monitors by environment, team, service, or any dimension.
+
+```bash
+# Filter monitors by tag
+curl 'http://localhost:3001/api/v1/monitors?tag=infrastructure' \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Multiple tags (AND logic)
+curl 'http://localhost:3001/api/v1/monitors?tag=production&tag=database' \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+The dashboard provides a tag filter dropdown for quick navigation.
+
+## Teams
+
+Assign a monitor to a team to group related monitors together. Teams serve two purposes:
+
+1. **Organization** -- filter and manage monitors by team in the API and dashboard.
+2. **Status pages** -- each team gets a public status page at `/status/:team-slug` showing all assigned monitors. See [Status Pages](/docs/status-pages).
+
+```bash
+# Create a team
+curl -X POST http://localhost:3001/api/v1/teams \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Platform Team", "slug": "platform"}'
+
+# Assign a monitor to a team
+curl -X PATCH http://localhost:3001/api/v1/monitors/MONITOR_ID \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"teamId": "TEAM_UUID"}'
+
+# Filter monitors by team
+curl 'http://localhost:3001/api/v1/monitors?teamId=TEAM_UUID' \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+## Pause and Resume
+
+Pause a monitor during maintenance windows, deployments, or expected downtime to suppress evaluations and alerts.
+
+```bash
+# Pause
+curl -X POST http://localhost:3001/api/v1/monitors/MONITOR_ID/pause \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Resume
+curl -X POST http://localhost:3001/api/v1/monitors/MONITOR_ID/resume \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Paused monitors are excluded from both the schedule sweep and max runtime sweep. They will not transition to `late` or `down`. Pings are still accepted and recorded, but they do not trigger state changes. Paused monitors still appear on status pages but will not generate incidents.
+
+## Monitor Stats
+
+The stats endpoint returns computed metrics for a monitor over a rolling 30-day window:
+
+```bash
+curl http://localhost:3001/api/v1/monitors/MONITOR_ID/stats \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+```json
+{
+  "uptimePercent": 99.85,
+  "avgRuntimeMs": 45200,
+  "failureRate": 0.003,
+  "totalPings": 720,
+  "totalIncidents": 1,
+  "periodDays": 30
+}
+```
+
+Dashboard stats are cached with a 30-second TTL to reduce database load.
+
+## Environment-Based Organization
+
+A common pattern is to use tags and separate teams to organize monitors by environment:
+
+```bash
+# Production monitors
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "DB Backup (prod)",
+    "slug": "db-backup-prod",
+    "schedule": "0 3 * * *",
+    "tags": ["production", "backup"],
+    "teamId": "PROD_TEAM_UUID"
+  }'
+```
+
+Use the tag filter to see all production monitors at a glance, and the team assignment to surface them on a production status page.
+
+## Per-Monitor Log Retention
+
+By default, ping logs are retained for `PING_RETENTION_DAYS` (global setting, default 30 days). Override this per-monitor with `logRetentionDays`:
+
+```bash
+curl -X PATCH http://localhost:3001/api/v1/monitors/MONITOR_ID \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"logRetentionDays": 90}'
+```
+
+Use longer retention for critical jobs where you need historical data for debugging, and shorter retention for high-frequency heartbeats to save disk space.
+
+## Next Steps
+
+- [Send pings from your jobs](/docs/ping-protocol) -- all 5 endpoints with code examples
+- [Set up alerts](/docs/alerts) -- configure Slack, Discord, PagerDuty, and more
+- [Use `kast wrap`](/docs/cli) -- monitor any shell command with one line
+- [Understand scheduling](/docs/scheduling) -- the 60-second sweep cycle and state machine details

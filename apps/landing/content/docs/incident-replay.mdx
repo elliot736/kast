@@ -1,0 +1,238 @@
+---
+title: Incident Replay
+description: Replay historical events to debug incidents, stream events via SSE, filter by monitor and topic, and backtest alert rules against real data.
+---
+
+
+Kast's event-sourced architecture means every ping, state change, and incident is stored in Redpanda's distributed log. The replay feature lets you seek to any point in time and stream events forward -- useful for debugging incidents and backtesting alert configurations.
+
+## Where Replay Reads From
+
+<ImageZoom src="/diagrams/topics.png" width={1693} height={521} alt="Redpanda topic architecture showing all 7 topics, their producers, and consumers including the replay consumer" />
+
+Replay creates a temporary Kafka consumer that reads from any of the 7 Redpanda topics. By default it reads from `ping-events`, but you can target any topic to see different perspectives on what happened during an incident.
+
+## Replay Workflow
+
+<Steps>
+<Step>
+### Create a Replay Session
+
+```bash
+curl -X POST http://localhost:3001/api/v1/replay \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "fromTimestamp": 1711929600000,
+    "toTimestamp": 1711933200000,
+    "monitorId": "MONITOR_UUID"
+  }'
+```
+
+#### Request Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `fromTimestamp` | number | Yes | Start time as Unix milliseconds |
+| `toTimestamp` | number | Yes | End time as Unix milliseconds |
+| `topic` | string | No | Redpanda topic to replay (default: `ping-events`) |
+| `monitorId` | string | No | Filter events to a specific monitor UUID |
+
+#### Response
+
+```json
+{
+  "sessionId": "abc123",
+  "status": "running",
+  "fromTimestamp": 1711929600000,
+  "toTimestamp": 1711933200000,
+  "topic": "ping-events",
+  "monitorId": "MONITOR_UUID"
+}
+```
+</Step>
+
+<Step>
+### Stream Events via SSE
+
+Connect to the SSE (Server-Sent Events) endpoint to receive events as the replay progresses:
+
+```bash
+curl -N http://localhost:3001/api/v1/replay/SESSION_ID/events \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+The `-N` flag disables curl's output buffering, which is required for SSE streams.
+</Step>
+
+<Step>
+### Analyze the Events
+
+Events are delivered in chronological order. Use the event data to understand what happened during the incident -- when pings arrived, when state transitions occurred, and when alerts were dispatched.
+</Step>
+
+<Step>
+### Clean Up
+
+Sessions auto-complete when all events in the time range have been streamed, or you can cancel manually:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/replay/SESSION_ID/cancel \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+</Step>
+</Steps>
+
+## SSE Event Types
+
+### `events`
+
+New events read from the topic:
+
+```json
+{
+  "type": "events",
+  "events": [
+    {
+      "monitorId": "uuid",
+      "type": "success",
+      "timestamp": "2026-03-24T03:00:05.000Z",
+      "body": null,
+      "sourceIp": "10.0.1.50"
+    },
+    {
+      "monitorId": "uuid",
+      "type": "fail",
+      "timestamp": "2026-03-24T03:15:00.000Z",
+      "body": "Error: connection refused",
+      "sourceIp": "10.0.1.50"
+    }
+  ],
+  "status": "running"
+}
+```
+
+Events are delivered in chronological order within each batch.
+
+### `heartbeat`
+
+Sent periodically when no new events are available. Keeps the SSE connection alive:
+
+```json
+{
+  "type": "heartbeat",
+  "status": "running",
+  "eventCount": 42
+}
+```
+
+The `eventCount` field shows the total events streamed so far.
+
+### `error`
+
+Sent if the session is not found or encounters an error:
+
+```json
+{
+  "type": "error",
+  "message": "Session not found"
+}
+```
+
+The SSE stream closes automatically when the session status becomes `completed` or `cancelled`.
+
+## Filtering by Monitor and Topic
+
+### Filter by Monitor
+
+Pass `monitorId` when creating the session to see only events for that monitor. This is the most common pattern when debugging a specific incident -- you see only the pings and state changes for the affected monitor.
+
+### Choose a Topic
+
+Replay different topics to see different perspectives:
+
+| Topic | What You See |
+|-------|-------------|
+| `ping-events` | Raw pings received during the period (start, success, fail, log) |
+| `monitor-evaluations` | Schedule evaluation decisions (late, missed, failed) |
+| `incident-events` | Incident lifecycle (opened, acknowledged, resolved) |
+| `alert-triggers` | Which alerts were triggered and for which monitors |
+| `monitor-state` | State transitions (healthy, late, down) |
+
+**Example: Debug why an alert fired late**
+
+1. Replay `ping-events` for the monitor to see when pings actually arrived.
+2. Replay `monitor-evaluations` to see when the sweep detected the overdue ping.
+3. Replay `alert-triggers` to see when the alert was dispatched.
+
+## Session Management
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Maximum concurrent sessions | 50 |
+| Session TTL | 10 minutes (auto-cleanup) |
+| Maximum events per session | 10,000 |
+
+Sessions are stored in memory. They do not survive API restarts. If the event count reaches 10,000, the session completes early.
+
+### Check Session Status
+
+```bash
+curl http://localhost:3001/api/v1/replay/SESSION_ID \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+```json
+{
+  "id": "abc123",
+  "status": "completed",
+  "eventCount": 156,
+  "fromTimestamp": 1711929600000,
+  "toTimestamp": 1711933200000,
+  "topic": "ping-events"
+}
+```
+
+Session statuses: `running`, `completed`, `cancelled`.
+
+## Backtesting Alert Rules
+
+Replay enables backtesting: change an alert configuration (thresholds, cooldowns, channels), then replay historical events to see how the new config would have behaved. This is a dry-run approach -- events are streamed to the client, which can evaluate them against modified rules without actually dispatching alerts.
+
+### Backtesting Workflow
+
+1. **Adjust your alert config** with new thresholds or cooldown values.
+2. **Create a replay session** for `monitor-evaluations` covering the time period you want to test.
+3. **Stream the events** and count how many would have triggered alerts under the new config.
+4. **Compare** with actual alert history to see the difference.
+5. **Iterate** until you find the right balance between noise and coverage.
+
+This lets you tune alerting without waiting for real incidents.
+
+## Incident Timeline in Dashboard
+
+The dashboard provides a visual incident timeline that uses replay data:
+
+- Events are displayed chronologically with color-coded dots:
+  - Green for success pings
+  - Blue for start pings
+  - Red for fail pings and down transitions
+  - Yellow for late transitions
+  - Gray for log entries
+- Hover over any dot to see the full event payload.
+- Click an incident to see all related events in a timeline view.
+
+The timeline is populated from the PostgreSQL projection for fast rendering, but you can trigger a full replay from Redpanda for deeper investigation.
+
+## How It Works Internally
+
+1. Kast creates a temporary Kafka consumer with a unique group ID (UUID-based, no conflicts with production consumer groups).
+2. The consumer calls `fetchTopicOffsetsByTimestamp(fromTimestamp)` to find the starting offset for each partition.
+3. It seeks to those offsets and reads forward.
+4. Events are buffered in memory and polled by the SSE endpoint every 500ms.
+5. If `monitorId` is set, events for other monitors are filtered out after reading.
+6. Reading stops when event timestamps exceed `toTimestamp` or the 10,000 event limit is reached.
+7. The consumer is disconnected, memory is freed, and the session is marked `completed`.
+8. Sessions that are not accessed for 10 minutes are cleaned up automatically.

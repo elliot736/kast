@@ -1,0 +1,244 @@
+---
+title: Ping Protocol
+description: Full reference for the Kast ping protocol covering all 5 endpoints, duration tracking, body capture, rate limiting, and code examples in 6 languages.
+---
+
+
+Pings are how your jobs communicate with Kast. Every ping is an HTTP request to a public endpoint -- no authentication required. Each monitor has a unique `pingUuid` assigned at creation.
+
+All ping endpoints return `202 Accepted` on success. The ping is published to the `ping-events` Redpanda topic asynchronously -- the HTTP response does not wait for downstream processing.
+
+## Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ping/:uuid` | Simple success ping (convenience alias) |
+| POST | `/ping/:uuid/start` | Signal that a job has started |
+| POST | `/ping/:uuid/success` | Signal that a job completed successfully |
+| POST | `/ping/:uuid/fail` | Signal that a job has failed |
+| POST | `/ping/:uuid/log` | Send a log entry without affecting monitor state |
+
+## What Happens on Each Ping
+
+![Data flow diagram showing a ping event traveling from HTTP ingestion through Redpanda to schedule evaluation, incident management, and PostgreSQL projection](/diagrams/dataflow.png)
+
+Every ping follows the same path:
+
+1. **Ping Controller** validates the UUID against the monitors table, returns `202 Accepted`, and publishes a `PingEvent` to `ping-events`.
+2. **Schedule Service** (`kast-scheduler` consumer group) recalculates `nextExpectedAt`. On a `success` ping, the monitor transitions to `healthy` if it was `late` or `down`.
+3. **Incident Service** (`kast-incidents-pings` consumer group) checks if an open incident exists for this monitor. On a `success` ping, it resolves the incident.
+4. **Sink Module** (`kast-sink` consumer group) writes the ping to PostgreSQL in batches (50 events or 200ms flush).
+5. **WebSocket Gateway** forwards the event to connected dashboard clients.
+
+### Endpoint-Specific Behavior
+
+| Endpoint | State Effect | Notes |
+|----------|-------------|-------|
+| `GET /ping/:uuid` | Sets status to `healthy`, recalculates `nextExpectedAt` | Identical to `/success` |
+| `POST /ping/:uuid/start` | Starts duration timer, recalculates `nextExpectedAt` | Pairs with `/success` for duration tracking |
+| `POST /ping/:uuid/success` | Sets status to `healthy`, stops duration timer, recalculates `nextExpectedAt` | Resolves open incidents |
+| `POST /ping/:uuid/fail` | Triggers evaluation, may open incident immediately | Does not wait for sweep cycle |
+| `POST /ping/:uuid/log` | No state change | Body is stored as metadata only |
+
+## Duration Tracking
+
+Send `/start` when your job begins and `/success` when it completes. Kast computes the duration from the start-to-success pair.
+
+```
+Job begins  -->  POST /ping/:uuid/start     (timer starts)
+Job runs...
+Job ends    -->  POST /ping/:uuid/success   (timer stops, duration recorded)
+```
+
+<Callout type="info">
+Duration tracking uses an in-memory `Map` keyed by monitor UUID for performance. The start timestamp is held in memory until a matching success or fail ping arrives. If the API restarts between start and success, the duration for that run is not recorded (the pings themselves are still captured).
+</Callout>
+
+If `maxRuntimeSeconds` is configured and the duration exceeds it, the monitor is marked as `down` with reason "Max runtime exceeded."
+
+## Body Capture
+
+POST endpoints (`/start`, `/success`, `/fail`, `/log`) accept an optional request body up to **64 KB**. The body is stored as metadata on the ping event.
+
+- Bodies exceeding 64 KB are truncated.
+- Any content type is accepted. The body is stored as a string.
+- JSON bodies receive syntax highlighting in the dashboard.
+- Use `/fail` with the error output as the body for quick debugging from the incident timeline.
+- Use `/log` to send diagnostic output without affecting monitor state.
+
+```bash
+# Send error output as the fail body
+/usr/local/bin/backup.sh 2>&1 | tee /tmp/backup.log
+if [ $? -ne 0 ]; then
+  curl -fsS -X POST http://localhost:3001/ping/YOUR_UUID/fail \
+    -d @/tmp/backup.log
+fi
+```
+
+## Code Examples
+
+<Tabs items={["Bash", "Python", "Node.js", "Go", "Ruby", "PHP"]}>
+<Tab value="Bash">
+```bash
+# Simple ping at the end of a cron job
+0 3 * * * /usr/local/bin/backup.sh && curl -fsS --retry 3 http://localhost:3001/ping/YOUR_UUID
+
+# With start/success/fail and error capture
+#!/bin/bash
+PING="http://localhost:3001/ping/YOUR_UUID"
+curl -fsS --retry 3 -X POST "$PING/start"
+if /usr/local/bin/backup.sh 2>&1 | tee /tmp/backup.log; then
+  curl -fsS --retry 3 -X POST "$PING/success"
+else
+  curl -fsS --retry 3 -X POST "$PING/fail" -d @/tmp/backup.log
+fi
+```
+</Tab>
+
+<Tab value="Python">
+```python
+import requests
+
+PING_URL = "http://localhost:3001/ping/YOUR_UUID"
+
+def run_job():
+    requests.post(f"{PING_URL}/start", timeout=5)
+    try:
+        do_work()
+        requests.post(f"{PING_URL}/success", timeout=5)
+    except Exception as e:
+        requests.post(f"{PING_URL}/fail", data=str(e), timeout=5)
+        raise
+```
+</Tab>
+
+<Tab value="Node.js">
+```javascript
+const PING_URL = "http://localhost:3001/ping/YOUR_UUID";
+
+async function runJob() {
+  await fetch(`${PING_URL}/start`, { method: "POST" });
+  try {
+    await doWork();
+    await fetch(`${PING_URL}/success`, { method: "POST" });
+  } catch (err) {
+    await fetch(`${PING_URL}/fail`, {
+      method: "POST",
+      body: err.message,
+    });
+    throw err;
+  }
+}
+```
+</Tab>
+
+<Tab value="Go">
+```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "strings"
+)
+
+const pingURL = "http://localhost:3001/ping/YOUR_UUID"
+
+func runJob() error {
+    http.Post(pingURL+"/start", "", nil)
+
+    if err := doWork(); err != nil {
+        http.Post(pingURL+"/fail", "text/plain", strings.NewReader(err.Error()))
+        return fmt.Errorf("job failed: %w", err)
+    }
+
+    http.Post(pingURL+"/success", "", nil)
+    return nil
+}
+```
+</Tab>
+
+<Tab value="Ruby">
+```ruby
+require 'net/http'
+
+PING_URL = URI("http://localhost:3001/ping/YOUR_UUID")
+
+def run_job
+  Net::HTTP.post(URI("#{PING_URL}/start"), "")
+  begin
+    do_work
+    Net::HTTP.post(URI("#{PING_URL}/success"), "")
+  rescue => e
+    Net::HTTP.post(URI("#{PING_URL}/fail"), e.message)
+    raise
+  end
+end
+```
+</Tab>
+
+<Tab value="PHP">
+```php
+<?php
+$pingUrl = "http://localhost:3001/ping/YOUR_UUID";
+
+function runJob() {
+    global $pingUrl;
+
+    file_get_contents("$pingUrl/start", false, stream_context_create([
+        'http' => ['method' => 'POST']
+    ]));
+
+    try {
+        doWork();
+        file_get_contents("$pingUrl/success", false, stream_context_create([
+            'http' => ['method' => 'POST']
+        ]));
+    } catch (Exception $e) {
+        file_get_contents("$pingUrl/fail", false, stream_context_create([
+            'http' => [
+                'method' => 'POST',
+                'content' => $e->getMessage()
+            ]
+        ]));
+        throw $e;
+    }
+}
+```
+</Tab>
+</Tabs>
+
+## `kast wrap` CLI Command
+
+The CLI provides a `kast wrap` command that wraps any shell command with automatic start/success/fail pings and captures stdout/stderr. This is the simplest way to monitor a cron job.
+
+```bash
+# In your crontab
+0 3 * * * kast wrap YOUR_PING_UUID -- /usr/local/bin/backup.sh
+```
+
+`kast wrap` sends `/start` before the command, spawns the process, captures output, then sends `/success` on exit code 0 or `/fail` with stderr on non-zero exit. See the [CLI Reference](/docs/cli) for details.
+
+## Rate Limiting
+
+<Callout type="warn">
+Ping endpoints are rate-limited to **300 requests per minute per source IP**. If the limit is exceeded, the endpoint returns `429 Too Many Requests` with a `Retry-After` header. Under normal operation (one ping per job execution), you will not approach this limit.
+</Callout>
+
+## Error Codes
+
+| Status Code | Meaning |
+|-------------|---------|
+| `202 Accepted` | Ping received and queued for processing |
+| `404 Not Found` | The UUID does not match any monitor |
+| `429 Too Many Requests` | Rate limit exceeded for this IP |
+
+## Best Practices
+
+- **Use `--retry 3`** with curl to handle transient network failures. A missed ping should not be caused by a momentary network blip.
+- **Use `-fsS`** in scripts. `-f` fails on HTTP errors, `-sS` suppresses progress but shows errors.
+- **Fire-and-forget is acceptable.** Do not let a ping failure break your job. The ping is a signal, not a dependency.
+- **Send start + success** for jobs where duration matters. This enables runtime tracking and max runtime alerting.
+- **Use `/fail` explicitly** rather than relying on missed pings. An explicit fail triggers evaluation immediately without waiting for the sweep cycle.
+- **Send log output via `/log`** to capture diagnostic data for post-incident debugging.
+- **Use `kast wrap`** instead of manual curl calls when possible. It handles start/success/fail, captures output, and passes through exit codes.

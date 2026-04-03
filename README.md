@@ -19,7 +19,8 @@ pnpm dev
 ```
 
 - **API**: http://localhost:3001
-- **Dashboard**: http://localhost:3000
+- **Dashboard**: http://localhost:3002 (dev) / http://localhost:3000 (prod)
+- **Docs**: http://localhost:3003
 - **Swagger docs**: http://localhost:3001/api/docs
 - **Redpanda Console**: http://localhost:28080
 
@@ -46,28 +47,32 @@ curl -fsS --retry 3 http://localhost:3001/ping/PING_UUID/success
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────┐
-│                NestJS Process                     │
-│                                                   │
-│  PingModule → publishes to ping-events            │
-│  SinkModule → consumes → writes to Postgres       │
-│  ScheduleModule → evaluates cron → detects late   │
-│  IncidentModule → opens/resolves incidents         │
-│  NotifyModule → dispatches Slack/Discord/etc       │
-│  WebSocketGateway → pushes to dashboard            │
-│  ReplayModule → seeks Redpanda offsets → SSE       │
-│                                                   │
-│  ┌─────────────────────────────────────────────┐  │
-│  │         Redpanda (Kafka-compatible)          │  │
-│  │  7 topics · partitioned by monitor UUID      │  │
-│  └─────────────────────────────────────────────┘  │
-│  ┌─────────────────────────────────────────────┐  │
-│  │     PostgreSQL (Drizzle ORM projections)     │  │
-│  └─────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                  NestJS Process                       │
+│                                                       │
+│  PingModule → publishes to ping-events                │
+│  SinkModule → consumes → writes to Postgres           │
+│  ScheduleModule → evaluates cron → detects late       │
+│  IncidentModule → opens/resolves incidents             │
+│  NotifyModule → dispatches Slack/Discord/etc           │
+│  JobExecutor → delegates to WorkflowEngine             │
+│  WorkflowEngine → DAG replay/memoize execution         │
+│  WebSocketGateway → pushes to dashboard                │
+│  ReplayModule → seeks Redpanda offsets → SSE           │
+│                                                       │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │         Redpanda (Kafka-compatible)              │  │
+│  │  14 topics · partitioned by monitor/job UUID     │  │
+│  └─────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │     PostgreSQL (Drizzle ORM projections)         │  │
+│  └─────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
 ```
 
-**Data flow**: Job sends HTTP ping → PingModule publishes to `ping-events` → SinkModule writes to Postgres → ScheduleModule evaluates schedule → IncidentModule opens incidents → NotifyModule dispatches alerts → WebSocket pushes to dashboard.
+**Monitoring flow**: Job sends HTTP ping → PingModule publishes to `ping-events` → SinkModule writes to Postgres → ScheduleModule evaluates schedule → IncidentModule opens incidents → NotifyModule dispatches alerts → WebSocket pushes to dashboard.
+
+**Job execution flow**: Cron fires or manual trigger → `job-triggers` → JobExecutor delegates to WorkflowEngine → DAG nodes execute (HTTP calls, sleep, conditions, fan-out) → `job-results` → JobBridge writes to DB.
 
 ## Ping Protocol
 
@@ -112,6 +117,21 @@ try {
 }
 ```
 
+## Job Execution & Workflows
+
+Jobs execute through DAG-based workflows with durable, replay-based execution:
+
+| Node Type | Description |
+|-----------|-------------|
+| `run` | HTTP request with configurable method, headers, timeout |
+| `sleep` | Pause for an ISO 8601 duration |
+| `condition` | Expression-based branching (true/false paths) |
+| `run_job` | Spawn a child job (wait or fire-and-forget) |
+| `fan_out` | Parallel execution with concurrency control |
+| `webhook_wait` | Pause until an external signal arrives |
+
+Jobs support automatic retries with exponential backoff and concurrency control (queue, skip, or cancel policies).
+
 ## API Reference
 
 Full Swagger docs at `/api/docs` when the API is running.
@@ -129,6 +149,18 @@ Full Swagger docs at `/api/docs` when the API is running.
 | POST | `/api/v1/monitors/:id/resume` | Resume monitoring |
 | GET | `/api/v1/monitors/:id/pings` | Ping history |
 | GET | `/api/v1/monitors/:id/stats` | Uptime %, avg runtime, failure rate |
+| POST | `/api/v1/jobs` | Create job |
+| GET | `/api/v1/jobs` | List jobs |
+| PATCH | `/api/v1/jobs/:id` | Update job |
+| DELETE | `/api/v1/jobs/:id` | Delete job (cascades runs) |
+| POST | `/api/v1/jobs/:id/trigger` | Trigger a manual run |
+| POST | `/api/v1/jobs/:id/pause` | Pause scheduled execution |
+| POST | `/api/v1/jobs/:id/resume` | Resume and recompute nextRunAt |
+| GET | `/api/v1/jobs/:id/runs` | List runs |
+| GET | `/api/v1/jobs/:id/runs/:runId` | Get run detail |
+| PUT | `/api/v1/jobs/:id/workflow` | Create or update workflow (DAG) |
+| GET | `/api/v1/jobs/:id/workflow` | Get workflow definition |
+| GET | `/api/v1/jobs/:id/runs/:runId/workflow` | Workflow run with step results |
 | GET | `/api/v1/incidents` | List incidents (filter: `status`) |
 | GET | `/api/v1/incidents/:id` | Incident detail |
 | POST | `/api/v1/incidents/:id/acknowledge` | Acknowledge incident |
@@ -138,7 +170,6 @@ Full Swagger docs at `/api/docs` when the API is running.
 | GET | `/api/v1/dead-letters` | Failed alert deliveries |
 | POST | `/api/v1/dead-letters/:id/retry` | Retry failed delivery |
 | POST | `/api/v1/replay` | Start replay session |
-| GET | `/api/v1/replay/:id` | Replay session status |
 | GET | `/api/v1/replay/:id/events` | Stream replayed events (SSE) |
 | POST | `/api/v1/teams` | Create team |
 | GET | `/api/v1/teams` | List teams |
@@ -158,6 +189,19 @@ Full Swagger docs at `/api/docs` when the API is running.
 | PagerDuty | Ready | Integration/routing key |
 | Telegram | Ready | Chat ID (requires `botToken` in config) |
 
+## CLI
+
+```bash
+kast health                          # Check API + dependencies
+kast monitors list                   # List monitors
+kast monitors create --name "..." --slug "..." --schedule "..."
+kast incidents list --status open    # View open incidents
+kast incidents ack INCIDENT_ID       # Acknowledge incident
+kast ping UUID                       # Send success ping
+kast wrap -m UUID -- ./backup.sh     # Wrap command with monitoring
+kast apply -f kast.yaml              # Declarative config management
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -174,12 +218,15 @@ Full Swagger docs at `/api/docs` when the API is running.
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | NestJS (Node.js/TypeScript) |
+| Backend | NestJS 11 (Node.js/TypeScript) |
 | Event streaming | Redpanda (Kafka-compatible) |
-| Database | PostgreSQL + Drizzle ORM |
-| Frontend | Next.js + shadcn/ui + Tailwind CSS |
+| Database | PostgreSQL 17 + Drizzle ORM |
+| Dashboard | Next.js 16 + shadcn/ui + Tailwind CSS 4 |
+| Docs | Next.js 16 + Fumadocs |
 | Real-time | Socket.IO (WebSocket) |
+| Workflow canvas | React Flow |
 | Charts | Recharts |
+| CLI | Commander.js |
 | Monorepo | Turborepo + pnpm |
 
 ## Project Structure
@@ -187,9 +234,12 @@ Full Swagger docs at `/api/docs` when the API is running.
 ```
 kast/
 ├── apps/
-│   ├── api/          # NestJS backend (14 modules)
-│   └── web/          # Next.js dashboard (13 pages)
-├── tests/e2e/        # Playwright API tests (37 tests)
+│   ├── api/          # NestJS backend (~25 modules)
+│   ├── web/          # Next.js dashboard
+│   └── landing/      # Documentation site (Fumadocs)
+├── packages/
+│   └── cli/          # CLI tool
+├── tests/e2e/        # Playwright API tests
 ├── docker-compose.yml
 └── turbo.json
 ```
@@ -198,11 +248,14 @@ kast/
 
 ```bash
 pnpm install                    # Install dependencies
-docker compose up -d redpanda postgres  # Start infra
-cd apps/api && pnpm db:migrate  # Run migrations
-pnpm dev                        # Start API + dashboard
+docker compose up -d            # Start Redpanda + PostgreSQL
+pnpm db:migrate                 # Run migrations
+pnpm dev                        # Start all apps (API + Dashboard + Docs)
 
-# Run E2E tests
+# Unit tests
+cd apps/api && pnpm test
+
+# E2E tests
 pnpm test:e2e
 ```
 

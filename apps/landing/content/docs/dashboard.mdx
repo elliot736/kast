@@ -1,0 +1,246 @@
+---
+title: Dashboard
+description: The Kast dashboard provides real-time monitoring, incident management, onboarding, and configuration through a Next.js frontend with auto-refresh and WebSocket streaming.
+---
+
+
+The Kast dashboard is a Next.js application that provides a complete interface for managing monitors, investigating incidents, configuring alerts, and viewing real-time event streams. It communicates with the API over REST and receives live updates over WebSocket.
+
+## Feature Overview
+
+<Cards>
+<Card title="Monitor Management" href="/docs/first-monitor">
+Create, edit, pause, resume, and delete monitors with cron or interval schedules
+</Card>
+<Card title="Incident Investigation" href="/docs/incident-replay">
+View incident timelines, acknowledge incidents, and replay events for debugging
+</Card>
+<Card title="Alert Configuration" href="/docs/alerts">
+Configure Slack, Discord, email, webhook, PagerDuty, and Telegram alerts per monitor
+</Card>
+<Card title="Real-Time Event Stream" href="/docs/realtime">
+Live feed of pings, state changes, and incidents via WebSocket
+</Card>
+<Card title="Status Pages" href="/docs/status-pages">
+Public team-based status pages with 30-day uptime bars
+</Card>
+<Card title="Dead Letter Management" href="/docs/dead-letters">
+Inspect failed alert deliveries and retry with one click
+</Card>
+</Cards>
+
+## Overview Page
+
+The dashboard home page shows a high-level summary of your monitoring estate.
+
+### Stat Cards
+
+Four stat cards at the top provide at-a-glance health:
+
+| Card | Description |
+|------|-------------|
+| **Total Monitors** | Count of all monitors across the team |
+| **Healthy** | Monitors in the `healthy` state |
+| **Down** | Monitors in the `down` state |
+| **Open Incidents** | Currently unresolved incidents |
+
+### Monitor Grid
+
+Below the stat cards, a grid of monitor cards shows each monitor with its current state (healthy, late, down), last ping time, and uptime percentage. Click any card to navigate to the monitor detail page.
+
+### Incident Table
+
+An incident table lists the most recent open incidents with the monitor name, state, opened time, and duration. Click any row to view the full incident timeline.
+
+### Auto-Refresh
+
+<Callout type="info">
+The overview page polls the API every **30 seconds** to refresh stat cards, monitor states, and incident status. This is a simple polling mechanism -- for true real-time updates, the dashboard also connects to the WebSocket gateway, which pushes events as they happen. See [Real-Time Streaming](/docs/realtime) for details.
+</Callout>
+
+## Onboarding Wizard
+
+When a team has no monitors, the dashboard shows an onboarding wizard that walks through setup in three steps:
+
+1. **Create a monitor.** Enter a name, slug, schedule type (cron or interval), and grace period. The form creates the monitor via the API.
+2. **Copy the curl command.** The wizard displays a ready-to-use curl command for sending a ping to the new monitor.
+3. **Live ping detection.** The wizard listens for incoming pings in real time. When the first ping arrives, a success animation plays and the wizard completes.
+
+The wizard is designed to get a new user from zero to a working monitored job in under 2 minutes.
+
+## Monitor Detail Page
+
+The monitor detail page is the primary interface for investigating a single monitor's behavior.
+
+### Stats Row
+
+A horizontal row of stats at the top:
+
+| Stat | Description |
+|------|-------------|
+| **Uptime** | Percentage of time the monitor has been healthy (last 30 days) |
+| **Total pings** | Count of all pings received |
+| **Avg runtime** | Average duration between `start` and `success` pings |
+| **Incidents** | Total incidents opened for this monitor |
+
+### Duration Chart
+
+A Recharts line chart showing job runtime (duration between `start` and `success` pings) over time. This helps identify jobs that are gradually slowing down before they hit their grace period.
+
+### Uptime Chart
+
+A 30-day bar chart where each bar represents one day. Bar color indicates the worst state that day:
+
+| Color | Meaning |
+|-------|---------|
+| Green | Healthy all day |
+| Yellow | At least one late event |
+| Red | At least one down event |
+| Gray | No data (monitor not active) |
+
+### Ping Timeline
+
+A chronological list of recent pings with:
+
+- Ping type (start, success, fail, log) with color-coded badge
+- Timestamp
+- Source IP
+- Duration (for success pings following a start ping)
+- Expandable body viewer showing the ping payload (up to 64 KB)
+
+Click any ping to expand its full body content in a syntax-highlighted viewer.
+
+## Incident Detail Page
+
+Each incident has a dedicated page showing the full lifecycle.
+
+### Timeline
+
+A vertical timeline of events with color-coded markers:
+
+| Color | Event Type |
+|-------|------------|
+| Red | Incident opened |
+| Green | Incident resolved |
+| Blue | Ping received |
+| Yellow | Ping missed (evaluation) |
+
+Each timeline entry shows the event type, timestamp, and relevant metadata.
+
+### Stats
+
+Incident stats include: duration (open to resolve), total pings during incident, monitor name, and alert deliveries triggered.
+
+### Linked Monitor
+
+A direct link to the monitor that triggered the incident for quick navigation.
+
+## Monitor Management
+
+### Creating a Monitor
+
+The monitor creation form collects:
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| **Name** | Human-readable name (e.g., "Nightly ETL") | Yes |
+| **Slug** | URL-safe identifier used in ping URLs | Yes |
+| **Schedule type** | `cron` or `interval` | Yes |
+| **Schedule** | Cron expression or interval in seconds | Yes |
+| **Grace period** | Seconds to wait after expected time before marking late | Yes |
+
+After creation, the dashboard shows the curl command for sending pings to the new monitor.
+
+### Editing a Monitor
+
+Monitors can be edited inline from the detail page. Click the edit button to toggle the form, make changes, and save. The slug cannot be changed after creation.
+
+### Deleting a Monitor
+
+Monitor deletion uses a two-click confirmation to prevent accidents:
+
+1. Click the delete button.
+2. A confirmation dialog appears with the monitor name. Click confirm to delete.
+
+Deletion removes the monitor and all associated pings, incidents, and alert configs.
+
+## Alert Configuration
+
+### Creating an Alert Config
+
+From a monitor's detail page, create alert configurations that define how and when to notify:
+
+| Field | Description |
+|-------|-------------|
+| **Channel** | One of: slack, discord, email, webhook, pagerduty, telegram |
+| **Destination** | Channel-specific target (webhook URL, email address, etc.) |
+| **Cooldown** | Minimum minutes between alerts for the same monitor |
+| **Threshold** | Number of consecutive failures before alerting |
+| **Enabled** | Toggle to enable/disable without deleting |
+
+See [Alert Channels](/docs/alerts) for channel-specific setup details.
+
+### Managing Alert Configs
+
+Alert configs can be edited, enabled/disabled, or deleted from the monitor detail page. Each config shows its channel, destination, cooldown, and current enabled state.
+
+## Team Management
+
+Teams are the organizational unit in Kast. All monitors, incidents, and alert configs belong to a team.
+
+From the team settings page:
+
+- View team members and their roles.
+- Invite new members by email.
+- Remove members.
+
+## Workflow Canvas
+
+The workflow builder provides a visual DAG editor powered by React Flow.
+
+### Building Workflows
+
+- **Add nodes** from the step menu: Run (HTTP request), Sleep, Condition, Run Job, Fan Out, and Webhook Wait.
+- **Connect nodes** by dragging from a node's output handle to another node's input handle.
+- **Condition branches** automatically create labeled true/false edges with color-coded handles (green for true, red for false).
+- **Configure nodes** by clicking on them to open the configuration panel with type-specific settings, retry policies, and failure handling.
+
+### Auto-Layout
+
+Click the **Layout** button in the bottom toolbar to automatically arrange nodes using a dagre-based algorithm. The layout engine:
+
+- Positions nodes in a top-to-bottom hierarchy based on the DAG structure
+- Places condition true-branches to the left and false-branches to the right
+- Uses smoothstep edges for clean visual connections
+
+### Execution Visualization
+
+When viewing a workflow run, the canvas shows live execution status:
+
+| Visual | Meaning |
+|--------|---------|
+| Pulsing border | Node is currently executing |
+| Green check | Node completed successfully |
+| Red X | Node failed |
+| Gray dash | Node was skipped |
+| Duration badge | Time taken for completed nodes |
+| True/False label | Condition evaluation result |
+
+## API Key Management
+
+The API keys page lists all keys for the team with:
+
+| Column | Description |
+|--------|-------------|
+| **Name** | Human-readable label for the key |
+| **Prefix** | First 8 characters of the key (e.g., `kst_a1b2...`) |
+| **Created** | When the key was created |
+| **Actions** | Copy and revoke buttons |
+
+### Copy to Clipboard
+
+Click the copy button next to any key to copy it. Note that the full key is only shown at creation time -- the copy button copies the key prefix for identification purposes.
+
+### Revoke Confirmation
+
+Revoking a key uses a confirmation dialog. Once revoked, any jobs or scripts using that key will immediately lose access. This action cannot be undone.

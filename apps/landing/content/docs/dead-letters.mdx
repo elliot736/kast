@@ -1,0 +1,190 @@
+---
+title: Dead Letters
+description: How Kast handles failed alert deliveries with exponential backoff retries, a dead letter topic, and one-click retry from the dashboard.
+---
+
+
+A dead letter is an alert delivery that failed all retry attempts and could not be delivered. Kast stores dead letters in a dedicated Redpanda topic for 30 days and surfaces them in both the API and the dashboard for inspection and one-click retry.
+
+## How Alerts Become Dead Letters
+
+<ImageZoom src="/diagrams/alerts.png" width={1416} height={1085} alt="Alert delivery sequence showing dispatch, retry with exponential backoff, and dead letter queue" />
+
+When an incident opens, the Notify Service attempts to deliver alerts to all configured channels. If a delivery fails (network error, invalid endpoint, rate limit from the provider), the alert enters a retry loop:
+
+<Steps>
+<Step>
+**Attempt 1 fails** -- republished to `alert-retries` with `retryAfter` = now + 30 seconds.
+</Step>
+
+<Step>
+**Attempt 2 fails** -- `retryAfter` = now + 2 minutes.
+</Step>
+
+<Step>
+**Attempt 3 fails** -- `retryAfter` = now + 15 minutes.
+</Step>
+
+<Step>
+**Attempt 4 fails** -- `retryAfter` = now + 1 hour.
+</Step>
+
+<Step>
+**Attempt 5 fails** -- `retryAfter` = now + 6 hours.
+</Step>
+
+<Step>
+**All 5 retries exhausted** -- published to `alert-deadletter`.
+</Step>
+</Steps>
+
+### Retry Schedule
+
+| Attempt | Backoff delay | Cumulative time |
+|---------|--------------|-----------------|
+| 1 | 30 seconds | 30s |
+| 2 | 2 minutes | 2m 30s |
+| 3 | 15 minutes | 17m 30s |
+| 4 | 1 hour | 1h 17m 30s |
+| 5 | 6 hours | 7h 17m 30s |
+
+After 7+ hours of retrying, if the delivery still fails, the alert is moved to the dead letter topic. This is aggressive enough to handle transient outages but avoids hammering a broken endpoint indefinitely.
+
+## The alert-deadletter Topic
+
+| Property | Value |
+|----------|-------|
+| Topic | `alert-deadletter` |
+| Partitions | 1 |
+| Retention | 30 days |
+| Cleanup policy | delete |
+
+Each dead letter message contains:
+
+- Alert delivery UUID
+- Monitor ID and name
+- Incident ID
+- Channel (slack, discord, email, webhook, pagerduty, telegram)
+- Destination (webhook URL, email address, etc.)
+- Number of attempts (always 5)
+- Last error message and HTTP status code
+- Original alert payload
+- Timestamps for first attempt and final failure
+
+## Dead Letter API
+
+### List Dead Letters
+
+```bash
+curl http://localhost:3001/api/v1/dead-letters \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Returns a paginated list of dead letters:
+
+```json
+{
+  "data": [
+    {
+      "id": "dl_uuid",
+      "monitorName": "nightly-etl",
+      "incidentId": "inc_uuid",
+      "channel": "slack",
+      "destination": "https://hooks.slack.com/services/...",
+      "attempts": 5,
+      "lastError": "HTTP 403 Forbidden: token_revoked",
+      "failedAt": "2026-01-15T16:30:00Z"
+    }
+  ],
+  "total": 3,
+  "page": 1,
+  "pageSize": 20
+}
+```
+
+### Retry a Dead Letter
+
+```bash
+curl -X POST http://localhost:3001/api/v1/dead-letters/dl_uuid/retry \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+This re-publishes the original alert payload to `alert-triggers`, restarting the full delivery attempt. The dead letter is marked as retried. If delivery fails again, it goes through the retry cycle and may end up as a new dead letter.
+
+## Dashboard Dead Letter Page
+
+The dead letters page in the dashboard shows a table with:
+
+| Column | Description |
+|--------|-------------|
+| **Channel** | Alert channel icon and name (Slack, Discord, etc.) |
+| **Monitor** | Name of the monitor that triggered the alert |
+| **Incident** | Link to the incident that opened the alert |
+| **Attempts** | Number of delivery attempts (always 5) |
+| **Error** | Last error message from the delivery attempt |
+| **Failed at** | Timestamp of the final failed attempt |
+| **Action** | Retry button |
+
+The retry button triggers `POST /api/v1/dead-letters/:id/retry` and shows a success toast when the alert is re-queued.
+
+## Debugging Failed Deliveries
+
+When a dead letter appears, the `lastError` field usually tells you what went wrong. Common errors:
+
+<Callout type="error">
+The most common causes of dead letters are revoked tokens, deleted webhooks, incorrect chat IDs, and unreachable SMTP servers. Always fix the root cause before retrying -- retrying without fixing the underlying issue will result in another dead letter after the full retry cycle completes.
+</Callout>
+
+### Slack
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `channel_not_found` | Webhook URL is invalid or the channel was deleted | Create a new Slack webhook and update the alert config |
+| `token_revoked` | The Slack app was uninstalled or the token was rotated | Reinstall the app and update the webhook URL |
+| `HTTP 429` | Slack rate limit | Wait and retry -- Kast's backoff handles this automatically |
+
+### Discord
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Unknown Webhook` | Webhook was deleted in Discord | Create a new webhook in Discord channel settings |
+| `HTTP 429` | Discord rate limit | Automatic retry handles this; check if multiple monitors share one webhook |
+
+### Email
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `ECONNREFUSED` | SMTP server unreachable | Verify `SMTP_HOST` and `SMTP_PORT` in environment variables |
+| `535 Authentication failed` | SMTP credentials are wrong | Update `SMTP_USER` and `SMTP_PASS` |
+
+### Webhook
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `ENOTFOUND` | DNS resolution failed for the webhook URL | Check the URL for typos |
+| `ECONNREFUSED` | Target server is down | Wait for the server to recover, then retry |
+| `HTTP 401/403` | Authentication failed | Check if the webhook requires auth headers |
+
+### PagerDuty
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Invalid Routing Key` | The PagerDuty integration key is wrong | Update the routing key in the alert config |
+| `HTTP 429` | PagerDuty rate limit | Automatic retry handles this |
+
+### Telegram
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `chat not found` | The bot was removed from the chat or the chat ID is wrong | Re-add the bot and verify the chat ID |
+| `Unauthorized` | Bot token is invalid | Create a new bot token via BotFather |
+
+## One-Click Retry Workflow
+
+1. Navigate to the **Dead Letters** page in the dashboard.
+2. Identify the failed delivery and read the error message.
+3. **Fix the root cause** (update webhook URL, rotate token, fix SMTP config).
+4. Click the **Retry** button on the dead letter row.
+5. The alert is re-queued for delivery. If the root cause is fixed, it will deliver successfully.
+
+Retrying without fixing the root cause will result in another dead letter after the retry cycle completes.

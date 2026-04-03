@@ -1,0 +1,179 @@
+---
+title: Scheduling
+description: How Kast evaluates cron and interval schedules, the 60-second sweep cycle, grace period logic, max runtime enforcement, and the monitor state machine.
+---
+
+
+Kast monitors jobs by expecting pings at specific times. When a ping does not arrive, the schedule evaluator determines whether the monitor is late, down, or has exceeded its maximum runtime.
+
+## Monitor State Machine
+
+<ImageZoom src="/diagrams/states.png" width={772} height={594} alt="Monitor state machine showing healthy, late, down, and paused states with all transition triggers" />
+
+Every monitor is always in one of four states: `healthy`, `late`, `down`, or `paused`. The schedule service drives transitions between the first three based on the sweep cycle. Pause and resume are manual operations.
+
+### State Transition Table
+
+| From | To | Trigger | Evaluation Result |
+|------|----|---------|-------------------|
+| healthy | late | Sweep: overdue but within grace period | `late` |
+| late | down | Sweep: grace period expired | `missed` |
+| healthy | down | Sweep: grace period expired (if very long sweep gap) | `missed` |
+| late | healthy | Success ping received | -- |
+| down | healthy | Success ping received | -- |
+| any | down | `/fail` ping received | `failed` |
+| any | down | Max runtime exceeded | `failed` (reason: "Max runtime exceeded") |
+| any | paused | Manual pause via API | -- |
+| paused | healthy | Manual resume via API | -- |
+
+## Cron Expression Parsing
+
+Kast uses `CronExpressionParser` from the `cron-parser` library to parse standard 5-field cron expressions. All times are UTC.
+
+```
++-------------- minute (0-59)
+| +------------ hour (0-23)
+| | +---------- day of month (1-31)
+| | | +-------- month (1-12)
+| | | | +------ day of week (0-7, 0 and 7 = Sunday)
+| | | | |
+* * * * *
+```
+
+After each successful or start ping, Kast calls `CronExpressionParser.parse(schedule).next().toDate()` to compute the next expected time.
+
+## Interval-Based Monitoring
+
+For monitors using `intervalSeconds` instead of a cron expression, the next expected time is calculated as:
+
+```
+nextExpectedAt = now + intervalSeconds
+```
+
+The clock resets on every success or start ping. If the monitor receives a success ping at 10:05:00 with `intervalSeconds: 300`, the next expected time is 10:10:00.
+
+## The 60-Second Sweep Cycle
+
+<Callout type="info">
+Kast runs a sweep every 60 seconds using the `@Interval(60000)` decorator on the schedule service. This is the core evaluation loop that detects overdue monitors and triggers state transitions. The sweep interval means there is up to a 60-second delay between a monitor becoming overdue and Kast detecting it.
+</Callout>
+
+### Sweep Algorithm
+
+```
+Every 60 seconds:
+  1. Query all monitors WHERE:
+     - isPaused = false
+     - nextExpectedAt < now
+     - status IN ('healthy', 'late')
+  2. For each overdue monitor:
+     a. Compute graceDeadline = nextExpectedAt + graceSeconds
+     b. If now < graceDeadline AND status = 'healthy':
+        - Transition to 'late'
+        - Publish MonitorEvaluation { result: 'late' }
+     c. If now >= graceDeadline:
+        - Transition to 'down'
+        - Publish MonitorEvaluation { result: 'missed' }
+     d. Publish MonitorStateEvent to monitor-state (compacted)
+  3. State transitions only fire when the status actually changes.
+     A monitor already in 'late' does not produce a duplicate 'late' evaluation.
+```
+
+### Sweep Query
+
+The sweep uses a single PostgreSQL query to find all overdue monitors:
+
+```sql
+SELECT * FROM monitors
+WHERE is_paused = false
+  AND next_expected_at < NOW()
+  AND status IN ('healthy', 'late')
+```
+
+This query is indexed on `(is_paused, next_expected_at, status)` for fast lookups even with thousands of monitors.
+
+## Grace Period Logic
+
+The grace period (`graceSeconds`, default 300) is the buffer between a missed expected time and a `down` state transition. It accounts for normal timing variation.
+
+```
+Timeline for a cron job at 0 3 * * * with graceSeconds: 600
+
+  03:00          03:05          03:10          03:12
+    |              |              |              |
+    v              v              v              v
+  expected      sweep:         sweep:         ping
+  time          late           down           arrives
+  passes        (within        (grace         -> healthy
+                grace)         expired)
+```
+
+The grace period should reflect the maximum acceptable delay for your job. Set it generously for jobs with variable execution times and tightly for heartbeat-style monitors.
+
+## Max Runtime Enforcement
+
+A separate sweep, also running every 60 seconds via `@Interval`, checks monitors that have `maxRuntimeSeconds` configured. This is the `sweepMaxRuntime` method.
+
+### Max Runtime Sweep Algorithm
+
+```
+Every 60 seconds:
+  1. Query monitors WHERE:
+     - maxRuntimeSeconds IS NOT NULL
+     - isPaused = false
+     - lastPingType = 'start'
+     - (now - lastPingAt) > maxRuntimeSeconds
+  2. For each exceeded monitor:
+     a. Transition to 'down'
+     b. Publish MonitorEvaluation { result: 'failed', reason: 'Max runtime exceeded' }
+     c. Publish MonitorStateEvent to monitor-state (compacted)
+```
+
+This catches jobs that hang, stall, or enter infinite loops. The condition `lastPingType = 'start'` ensures that only monitors currently "running" (started but not yet succeeded or failed) are checked.
+
+## How nextExpectedAt Is Calculated
+
+On every `success` or `start` ping:
+
+| Schedule Type | Calculation |
+|--------------|-------------|
+| Cron | `CronExpressionParser.parse(schedule).next().toDate()` -- the next occurrence after `now` |
+| Interval | `now + intervalSeconds` |
+
+The computed value is stored on the monitor record in PostgreSQL:
+
+```sql
+UPDATE monitors SET next_expected_at = $1, status = 'healthy', last_ping_at = NOW()
+WHERE id = $2
+```
+
+The sweep uses this stored value to find overdue monitors. This means the sweep never parses cron expressions itself -- the parsing happens once per ping, and the result is stored.
+
+## Consecutive Failure Tracking
+
+Each monitor tracks a `consecutiveFailures` counter. It increments when the monitor transitions to `down` and resets to 0 when it returns to `healthy`.
+
+This counter is used by the alert system:
+
+- Alert configs have a `thresholdFailures` field (default 1).
+- An alert is only dispatched if `consecutiveFailures >= thresholdFailures`.
+- This prevents noisy alerts for monitors that occasionally miss a single ping.
+
+The counter is published as part of the `MonitorStateEvent` to the compacted `monitor-state` topic, so it survives restarts.
+
+## Dashboard Caching
+
+The `getDashboardStats` method (powering `GET /api/v1/dashboard`) caches its result with a **30-second TTL**. This endpoint aggregates counts across all monitors (total, healthy, late, down, paused) and recent incident counts. Caching prevents expensive aggregate queries on every dashboard page load.
+
+The cache is invalidated automatically after 30 seconds. Real-time updates flow through the WebSocket gateway, so the dashboard does not rely on polling this endpoint for live data.
+
+## Paused Monitors
+
+Monitors with `isPaused: true` are excluded from both sweep cycles:
+
+- They do not transition to `late` or `down`.
+- Max runtime checks are skipped.
+- Pings are still accepted and recorded in `ping-events` and PostgreSQL, but they do not trigger state changes.
+- Paused monitors still appear on status pages.
+
+Resume a monitor with `POST /api/v1/monitors/:id/resume`. The monitor returns to `healthy` status, and `nextExpectedAt` is recalculated from the current time.

@@ -1,0 +1,234 @@
+---
+title: Status Pages
+description: Public team-based status pages showing per-monitor uptime bars, active incidents, overall health status, and auto-refresh for stakeholder visibility.
+---
+
+
+Kast provides public status pages for each team. No authentication is required -- share the URL with your users, customers, or stakeholders to provide transparent visibility into your system health.
+
+## How It Works
+
+Every team in Kast gets a public status page accessible at:
+
+```
+https://your-kast-instance/status/:team-slug
+```
+
+The endpoint is public (no API key or session required) and returns JSON with the full status page data. The dashboard renders this as a styled page.
+
+## Setting Up a Status Page
+
+<Steps>
+<Step>
+### Create a Team
+
+```bash
+curl -X POST http://localhost:3001/api/v1/teams \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "Platform Team",
+    "slug": "platform"
+  }'
+```
+
+The `slug` becomes the URL path. Choose something short, descriptive, and URL-safe: `/status/platform`, `/status/payments`, `/status/api`.
+</Step>
+
+<Step>
+### Assign Monitors to the Team
+
+When creating a new monitor, set the `teamId`:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "API Server",
+    "slug": "api-server",
+    "schedule": "*/5 * * * *",
+    "teamId": "TEAM_UUID"
+  }'
+```
+
+Or assign an existing monitor:
+
+```bash
+curl -X PATCH http://localhost:3001/api/v1/monitors/MONITOR_ID \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"teamId": "TEAM_UUID"}'
+```
+
+A monitor can belong to one team. Remove a monitor from a team by setting `teamId` to `null`.
+</Step>
+
+<Step>
+### Access the Status Page
+
+```
+http://localhost:3001/status/platform
+```
+
+No authentication needed. Share this URL directly.
+</Step>
+</Steps>
+
+## What the Status Page Shows
+
+### Overall Status
+
+The page displays one of three aggregate statuses based on the worst monitor state:
+
+| Overall Status | Condition |
+|---------------|-----------|
+| **Operational** | All monitors are `healthy` or `paused` |
+| **Degraded** | At least one monitor is `late` |
+| **Outage** | At least one monitor is `down` |
+
+### Per-Monitor 30-Day Uptime Bars
+
+Each monitor shows a visual bar representing its health over the past 30 days. Each segment corresponds to one day:
+
+- Green: 100% uptime (no incidents that day)
+- Yellow: partial uptime (some incidents, resolved)
+- Red: significant downtime
+- Gray: no data (monitor was paused or did not exist)
+
+The uptime percentage is displayed next to each bar.
+
+### Active Incidents
+
+Currently open incidents for monitors in this team are listed with:
+
+- Monitor name
+- Status (`down` or `late`)
+- Reason (e.g., "Ping missed", "Max runtime exceeded")
+- Duration (how long the incident has been open)
+- Timestamp when the incident opened
+
+### Recent Resolved Incidents
+
+Incidents resolved within the past 7 days are shown with:
+
+- Monitor name
+- Duration of the incident
+- Resolution timestamp
+- Reason
+
+## API Response Format
+
+```bash
+curl http://localhost:3001/status/platform
+```
+
+```json
+{
+  "team": {
+    "name": "Platform Team",
+    "slug": "platform"
+  },
+  "overallStatus": "operational",
+  "monitors": [
+    {
+      "name": "API Server",
+      "slug": "api-server",
+      "status": "healthy",
+      "uptimePercent": 99.95,
+      "lastPingAt": "2026-03-24T12:05:02.000Z",
+      "uptimeBars": [100, 100, 99.8, 100, "..."]
+    },
+    {
+      "name": "DB Backup",
+      "slug": "db-backup",
+      "status": "healthy",
+      "uptimePercent": 99.85,
+      "lastPingAt": "2026-03-24T03:00:15.000Z",
+      "uptimeBars": [100, 100, 100, 98.5, "..."]
+    }
+  ],
+  "activeIncidents": [],
+  "recentIncidents": [
+    {
+      "monitorName": "DB Backup",
+      "status": "resolved",
+      "reason": "Ping missed",
+      "openedAt": "2026-03-20T03:10:00.000Z",
+      "resolvedAt": "2026-03-20T03:12:30.000Z",
+      "durationSeconds": 150
+    }
+  ]
+}
+```
+
+## Auto-Refresh
+
+The dashboard status page auto-refreshes every **30 seconds**. It polls the public status endpoint to update the display. No WebSocket connection is needed for the status page -- it is designed for simplicity and broad compatibility.
+
+## "Powered by Kast" Footer
+
+<Callout type="info">
+Every status page includes a "Powered by Kast" footer with a link to the Kast project. This provides attribution and serves as an organic discovery channel for the project.
+</Callout>
+
+## Embedding and Sharing
+
+### Direct Link
+
+Share the status page URL directly:
+
+```
+https://kast.yourdomain.com/status/platform
+```
+
+### iframe Embedding
+
+Embed the status page in your own documentation or support site:
+
+```html
+<iframe
+  src="https://kast.yourdomain.com/status/platform"
+  width="100%"
+  height="600"
+  frameborder="0"
+></iframe>
+```
+
+### JSON Integration
+
+The public endpoint returns JSON, making it easy to integrate into custom dashboards, Slack bots, or monitoring aggregators:
+
+```bash
+# Check overall status programmatically
+curl -s http://localhost:3001/status/platform | jq '.overallStatus'
+```
+
+## Managing Teams
+
+```bash
+# List all teams
+curl http://localhost:3001/api/v1/teams \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Get a specific team
+curl http://localhost:3001/api/v1/teams/TEAM_ID \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Update a team
+curl -X PATCH http://localhost:3001/api/v1/teams/TEAM_ID \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "Infrastructure Team"}'
+
+# Delete a team (monitors are unassigned, not deleted)
+curl -X DELETE http://localhost:3001/api/v1/teams/TEAM_ID \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+## Tips
+
+- **One team per product or service.** Create separate teams for "API", "Payments", "Data Pipeline" rather than one team for everything.
+- **Only include customer-visible monitors.** Internal health checks and dev environment monitors should not be on a public status page.
+- **Paused monitors still appear** on the status page but will not trigger incidents. Consider removing a monitor from the team instead of pausing if you want it hidden.
+- **Status page data comes from the `monitor-state` compacted topic**, so it reflects the most current state within seconds of a change.

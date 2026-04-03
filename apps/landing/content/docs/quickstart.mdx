@@ -1,0 +1,153 @@
+---
+title: Quickstart
+description: Get Kast running locally in 5 minutes with Docker Compose, create your first monitor, and send your first ping.
+---
+
+
+This guide takes you from zero to a working Kast installation with a monitored job in under 5 minutes.
+
+## Prerequisites
+
+| Requirement | Version | Purpose |
+|-------------|---------|---------|
+| Docker + Docker Compose | v2+ | Run Redpanda and PostgreSQL |
+| Node.js | 22+ | Runtime for the API and dashboard |
+| pnpm | 9+ | Package manager (monorepo workspaces) |
+
+## Setup
+
+<Steps>
+<Step>
+### Clone and Install
+
+```bash
+git clone https://github.com/your-org/kast.git
+cd kast
+pnpm install
+```
+</Step>
+
+<Step>
+### Start Infrastructure
+
+```bash
+docker compose up -d redpanda postgres
+```
+
+This starts two containers:
+
+- **Redpanda** -- Kafka-compatible event streaming broker on port `29092`. All ping events, state changes, incidents, and alerts flow through Redpanda topics.
+- **PostgreSQL** -- Relational storage on port `25432`. Stores derived projections of the event log for fast querying by the API and dashboard.
+
+Wait a few seconds for both services to become healthy before proceeding.
+</Step>
+
+<Step>
+### Run Database Migrations
+
+```bash
+cd apps/api
+pnpm db:migrate
+```
+
+This creates all 10 tables (monitors, pings, incidents, alert configs, dead letters, teams, API keys, users, sessions, accounts) and their indexes.
+</Step>
+
+<Step>
+### Start the API and Dashboard
+
+```bash
+cd ../..
+pnpm dev
+```
+
+Two services start:
+
+| Service | URL | Description |
+|---------|-----|-------------|
+| API | `http://localhost:3001` | NestJS backend with REST endpoints and WebSocket gateway |
+| Dashboard | `http://localhost:3000` | Next.js frontend with real-time updates |
+
+Swagger documentation is available at `http://localhost:3001/api/docs`.
+</Step>
+
+<Step>
+### Create an API Key
+
+API keys authenticate requests to protected endpoints. The key creation endpoint itself is public so you can bootstrap.
+
+```bash
+curl -X POST http://localhost:3001/api/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -d '{"label": "my-app"}'
+```
+
+Response:
+
+```json
+{
+  "id": "uuid",
+  "label": "my-app",
+  "key": "kst_abc123...",
+  "createdAt": "2026-03-24T00:00:00.000Z"
+}
+```
+
+<Callout type="info">
+Save the `key` value. It is shown only once and cannot be retrieved later.
+</Callout>
+</Step>
+
+<Step>
+### Create a Monitor
+
+```bash
+curl -X POST http://localhost:3001/api/v1/monitors \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "DB Backup",
+    "slug": "db-backup",
+    "schedule": "0 3 * * *",
+    "graceSeconds": 600,
+    "tags": ["infrastructure", "backup"]
+  }'
+```
+
+The response includes a `pingUuid`. This is the unique identifier your job uses to send pings.
+</Step>
+
+<Step>
+### Send Your First Ping
+
+```bash
+curl -fsS http://localhost:3001/ping/YOUR_PING_UUID/success
+```
+
+This reports a successful job completion. The ping enters the system and flows through the full event pipeline.
+</Step>
+</Steps>
+
+## What Happens When a Ping Arrives
+
+<ImageZoom src="/diagrams/dataflow.png" width={870} height={1048} alt="Data flow diagram showing a ping event traveling from HTTP ingestion through Redpanda topics to schedule evaluation, incident management, and alert dispatch" />
+
+When your `curl` hits the ping endpoint:
+
+1. The **Ping Controller** validates the UUID, returns `202 Accepted`, and publishes a `PingEvent` to the `ping-events` Redpanda topic.
+2. The **Schedule Service** consumes the event, recalculates `nextExpectedAt` for the monitor, and publishes the updated state to the `monitor-state` compacted topic.
+3. The **Sink Module** consumes the event and writes a row to the PostgreSQL `pings` table (batched: 50 events or 200ms flush interval).
+4. The **WebSocket Gateway** forwards the event to connected dashboard clients for real-time display.
+5. If the monitor was previously in a `late` or `down` state, the schedule service resolves the issue, and the **Incident Service** closes the open incident.
+
+## 8. Verify in the Dashboard
+
+Open `http://localhost:3000` in your browser. You should see your "DB Backup" monitor in `healthy` status with the ping you just sent visible in the timeline.
+
+## Next Steps
+
+- [Configure alert channels](/docs/alerts) -- set up Slack, Discord, PagerDuty, or any of the 6 supported channels
+- [Ping protocol deep dive](/docs/ping-protocol) -- start, success, fail, and log pings with code examples in 6 languages
+- [Use `kast wrap`](/docs/cli) -- wrap any shell command with automatic monitoring in one line
+- [Your first monitor](/docs/first-monitor) -- understand grace periods, max runtime, tags, and teams
+- [Self-hosting in production](/docs/self-hosting) -- Docker Compose production deployment with TLS and backups

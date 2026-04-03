@@ -1,0 +1,264 @@
+---
+title: Observability
+description: Monitor Kast itself with structured logging, Prometheus metrics, health endpoints, and correlation IDs for end-to-end request tracing.
+---
+
+
+Kast exposes structured logs, Prometheus metrics, and health endpoints so you can monitor the monitoring platform itself. This page covers what is available and how to wire it into your existing observability stack.
+
+## Structured Logging
+
+Kast uses [Pino](https://getpino.io/) for structured JSON logging. Every log entry is a JSON object with a consistent schema, making it easy to ingest into Elasticsearch, Loki, Datadog, or any structured log aggregator.
+
+### Output Formats
+
+| Environment | Format | Example |
+|-------------|--------|---------|
+| Production | JSON (one line per entry) | `{"level":30,"time":1705312800000,"msg":"Ping received","monitorId":"uuid"}` |
+| Development | Pretty-printed with colors | Human-readable with timestamps, level names, and colors |
+
+### LOG_LEVEL
+
+Set the `LOG_LEVEL` environment variable to control verbosity:
+
+| Level | Value | Use case |
+|-------|-------|----------|
+| `fatal` | 60 | Only fatal errors |
+| `error` | 50 | Errors and fatal |
+| `warn` | 40 | Warnings and above |
+| `info` | 30 | **Default.** Normal operation events |
+| `debug` | 20 | Detailed debugging information |
+| `trace` | 10 | Very verbose, includes internal details |
+
+```bash
+# In .env or docker-compose.yml
+LOG_LEVEL=debug
+```
+
+## Request Correlation IDs
+
+<Callout type="info">
+Every HTTP request is assigned a correlation ID for end-to-end tracing. If the client sends an `x-request-id` header, that value is used. Otherwise, a UUID v4 is generated. The ID is attached to all Pino log entries, returned in the `x-request-id` response header, and propagated to any Redpanda events published during the request. This allows you to trace a single ping from HTTP ingestion through event processing to alert delivery.
+</Callout>
+
+### Tracing a Request
+
+To trace a ping from HTTP ingestion through event processing to alert delivery:
+
+```bash
+# Send a ping with a custom correlation ID
+curl -X POST http://localhost:3001/api/v1/monitors/nightly-etl/ping/fail \
+  -H 'x-request-id: debug-trace-001'
+
+# Search logs for this correlation ID
+# In your log aggregator: requestId="debug-trace-001"
+```
+
+Every log entry and Redpanda event related to this ping will carry `debug-trace-001`, allowing you to follow the full processing pipeline.
+
+## Prometheus Metrics
+
+Kast exposes a Prometheus-compatible metrics endpoint at `GET /metrics`. Scrape it with Prometheus, Grafana Agent, Victoria Metrics, or any compatible collector.
+
+```bash
+curl http://localhost:3001/metrics
+```
+
+### Custom Metrics
+
+Kast exposes 4 custom metrics specific to monitoring operations:
+
+<Tabs items={["Prometheus Queries", "Grafana Dashboard"]}>
+<Tab value="Prometheus Queries">
+#### kast_ping_events_total
+
+| Property | Value |
+|----------|-------|
+| Type | Counter |
+| Labels | `type` (start, success, fail, log) |
+| Description | Total number of ping events received, broken down by ping type |
+
+```
+kast_ping_events_total{type="success"} 14523
+kast_ping_events_total{type="fail"} 42
+kast_ping_events_total{type="start"} 14580
+kast_ping_events_total{type="log"} 891
+```
+
+#### kast_incidents_opened_total
+
+| Property | Value |
+|----------|-------|
+| Type | Counter |
+| Labels | None |
+| Description | Total number of incidents opened |
+
+```
+kast_incidents_opened_total 17
+```
+
+#### kast_alert_deliveries_total
+
+| Property | Value |
+|----------|-------|
+| Type | Counter |
+| Labels | `channel` (slack, discord, email, webhook, pagerduty, telegram), `status` (delivered, failed) |
+| Description | Total alert deliveries attempted, broken down by channel and outcome |
+
+```
+kast_alert_deliveries_total{channel="slack",status="delivered"} 89
+kast_alert_deliveries_total{channel="slack",status="failed"} 3
+kast_alert_deliveries_total{channel="webhook",status="delivered"} 156
+```
+
+#### kast_http_request_duration_seconds
+
+| Property | Value |
+|----------|-------|
+| Type | Histogram |
+| Labels | `method` (GET, POST, etc.), `route` (path pattern), `status_code` (200, 404, etc.) |
+| Buckets | Default Prometheus histogram buckets |
+| Description | HTTP request latency in seconds |
+
+```
+kast_http_request_duration_seconds_bucket{method="POST",route="/api/v1/monitors/:slug/ping/:type",status_code="200",le="0.005"} 12043
+kast_http_request_duration_seconds_bucket{method="POST",route="/api/v1/monitors/:slug/ping/:type",status_code="200",le="0.01"} 14201
+```
+</Tab>
+
+<Tab value="Grafana Dashboard">
+### Suggested Panels
+
+| Panel | Type | Query | Purpose |
+|-------|------|-------|---------|
+| **Ping rate** | Time series | `rate(kast_ping_events_total[5m])` | Ping throughput over time |
+| **Ping rate by type** | Stacked time series | `rate(kast_ping_events_total[5m])` grouped by `type` | Breakdown of ping types |
+| **Incidents opened** | Time series | `rate(kast_incidents_opened_total[1h])` | Incident frequency |
+| **Alert delivery rate** | Time series | `rate(kast_alert_deliveries_total[5m])` grouped by `status` | Delivery success vs failure |
+| **Alert failures by channel** | Bar gauge | `kast_alert_deliveries_total{status="failed"}` grouped by `channel` | Which channels are failing |
+| **HTTP latency (p99)** | Time series | `histogram_quantile(0.99, rate(kast_http_request_duration_seconds_bucket[5m]))` | API latency |
+| **HTTP latency by route** | Heatmap | `kast_http_request_duration_seconds_bucket` grouped by `route` | Hot routes |
+| **Memory usage** | Time series | `process_resident_memory_bytes` | Memory trends |
+| **Event loop lag** | Time series | `nodejs_eventloop_lag_seconds` | Event loop health |
+| **Readiness** | Stat | Probe the `/ready` endpoint with Blackbox Exporter | Up/down status |
+
+### Prometheus Scrape Config
+
+```yaml
+scrape_configs:
+  - job_name: 'kast'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:3001']
+    metrics_path: '/metrics'
+```
+</Tab>
+</Tabs>
+
+### Default Node.js Metrics
+
+In addition to custom metrics, Kast exposes default Node.js runtime metrics via `prom-client`:
+
+| Metric | Description |
+|--------|-------------|
+| `process_cpu_seconds_total` | Total CPU time consumed |
+| `process_resident_memory_bytes` | Resident memory size |
+| `nodejs_heap_size_total_bytes` | V8 total heap size |
+| `nodejs_heap_size_used_bytes` | V8 used heap size |
+| `nodejs_eventloop_lag_seconds` | Event loop lag |
+| `nodejs_gc_duration_seconds` | Garbage collection duration by type |
+
+These are useful for capacity planning and detecting memory leaks or event loop saturation.
+
+## Health Endpoints
+
+Kast exposes two health endpoints following the Kubernetes liveness/readiness pattern.
+
+### GET /health (Liveness)
+
+Always returns `200 OK` if the process is running. Use this for liveness probes.
+
+```bash
+curl http://localhost:3001/health
+```
+
+```json
+{
+  "status": "ok"
+}
+```
+
+If this endpoint stops responding, the process is hung and should be restarted.
+
+### GET /ready (Readiness)
+
+Checks that all critical dependencies are reachable. Returns `200 OK` if healthy, `503 Service Unavailable` if degraded.
+
+```bash
+curl http://localhost:3001/ready
+```
+
+**Healthy response (200):**
+
+```json
+{
+  "status": "ok",
+  "checks": {
+    "postgres": "ok",
+    "redpanda": "ok"
+  }
+}
+```
+
+**Degraded response (503):**
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "postgres": "ok",
+    "redpanda": "error"
+  }
+}
+```
+
+The readiness endpoint checks:
+
+| Dependency | Check |
+|-----------|-------|
+| **PostgreSQL** | Execute a `SELECT 1` query |
+| **Redpanda** | List topics via the admin API |
+
+Use this for readiness probes in Kubernetes or health checks in Docker Compose. Traffic should not be routed to an instance that is not ready.
+
+## Alerting on Kast Itself
+
+<Callout type="info">
+If Kast is your monitoring platform, you need something else to monitor Kast. Use Prometheus Alertmanager or Grafana alerting to watch for failures in the platform itself.
+</Callout>
+
+### Recommended Alerts
+
+| Alert | Condition | Severity |
+|-------|-----------|----------|
+| **Kast down** | `/ready` returns 503 for > 2 minutes | Critical |
+| **High alert failure rate** | `rate(kast_alert_deliveries_total{status="failed"}[5m]) > 0.1` | Warning |
+| **No pings received** | `rate(kast_ping_events_total[10m]) == 0` (if you expect constant traffic) | Warning |
+| **High latency** | `histogram_quantile(0.99, rate(kast_http_request_duration_seconds_bucket[5m])) > 1` | Warning |
+| **Memory leak** | `process_resident_memory_bytes` steadily increasing over 24h | Warning |
+
+### Example Alertmanager Rule
+
+```yaml
+groups:
+  - name: kast
+    rules:
+      - alert: KastNotReady
+        expr: probe_success{job="kast-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Kast readiness check failing"
+          description: "The /ready endpoint has been returning 503 for more than 2 minutes. Check PostgreSQL and Redpanda connectivity."
+```

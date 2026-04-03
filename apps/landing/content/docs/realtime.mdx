@@ -1,0 +1,202 @@
+---
+title: Real-Time Streaming
+description: WebSocket gateway that pushes ping events, state changes, and incidents to the dashboard and external clients via Socket.IO.
+---
+
+
+Kast pushes events to connected clients in real time over WebSocket using Socket.IO. The WebSocket gateway bridges Redpanda consumers and browser clients -- when an event is published to a topic, connected clients receive it within milliseconds.
+
+## How It Works
+
+```
+Redpanda topic → Consumer → WebSocket Gateway → Socket.IO → Browser
+```
+
+<Callout type="info">
+Three dedicated Redpanda consumers subscribe to event topics. When a message arrives, the gateway checks if any clients are connected. If so, it emits the event over Socket.IO. If no clients are connected, the event is consumed and discarded -- no buffering or backpressure. The consumer still commits offsets, so events are not replayed when a client connects later.
+</Callout>
+
+## Event Channels
+
+The gateway emits events on three named channels:
+
+| Channel | Redpanda Topic | Consumer Group | Event Data |
+|---------|---------------|----------------|------------|
+| `ping` | `ping-events` | `kast-ws-ping-events` | Monitor ID, ping type, timestamp, source IP, body |
+| `monitor-state` | `monitor-state` | `kast-ws-monitor-state` | Monitor ID, new state, last ping time, next expected |
+| `incident` | `incident-events` | `kast-ws-incident-events` | Incident ID, monitor ID, event type (opened/resolved) |
+
+### Connected Client Check
+
+Before emitting, the gateway checks `connectedClients > 0`. This avoids serialization and emission overhead when no one is listening. The consumer still commits offsets -- events are not replayed when a client connects later.
+
+## Socket.IO Configuration
+
+The WebSocket gateway runs on the `/events` namespace:
+
+```
+ws://localhost:3001/events
+```
+
+Socket.IO handles:
+
+- **Automatic reconnection** with exponential backoff.
+- **Transport upgrade** from HTTP long-polling to WebSocket.
+- **Connection multiplexing** -- multiple event channels over a single connection.
+
+## Frontend: useEventStream Hook
+
+The dashboard uses a `useEventStream` React hook that manages the Socket.IO connection lifecycle:
+
+```typescript
+const { events, isConnected, stats } = useEventStream({
+  channels: ['ping', 'monitor-state', 'incident'],
+  maxEvents: 100,
+});
+```
+
+The hook:
+
+- Connects to the `/events` namespace on mount.
+- Subscribes to the specified channels.
+- Maintains a rolling buffer of the last `maxEvents` events.
+- Tracks connection state (`isConnected`) for the UI indicator.
+- Accumulates session stats (events received per channel).
+- Automatically reconnects on disconnection.
+
+## Live Stream Page
+
+The dashboard includes a live stream page that displays a real-time feed of all events. This is useful for debugging and observing system behavior.
+
+### Event Feed
+
+A scrolling list of events, newest at the top. Each event shows:
+
+- Event type icon (ping, state change, incident)
+- Monitor name
+- Timestamp
+- Event-specific details (ping type, new state, incident action)
+
+### Filters
+
+A filter bar at the top with four options:
+
+| Filter | Shows |
+|--------|-------|
+| **All** | All events from all channels |
+| **Pings** | Only ping events |
+| **State Changes** | Only monitor state transitions |
+| **Incidents** | Only incident lifecycle events |
+
+### Connection Indicator
+
+A colored dot in the header shows connection status:
+
+| Color | Status |
+|-------|--------|
+| Green | Connected and receiving events |
+| Red | Disconnected, attempting reconnect |
+
+### Session Stats
+
+A stats bar showing event counts since the page was opened:
+
+- Total events received
+- Pings received
+- State changes received
+- Incidents received
+
+## Connecting from External Apps
+
+You can connect to the WebSocket gateway from any Socket.IO client. This enables building custom dashboards, notification bots, or integration pipelines.
+
+<Tabs items={["Node.js", "Browser"]}>
+<Tab value="Node.js">
+```typescript
+import { io } from 'socket.io-client';
+
+const socket = io('http://localhost:3001/events', {
+  transports: ['websocket'],
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionDelayMax: 30000,
+});
+
+socket.on('connect', () => {
+  console.log('Connected to Kast event stream');
+});
+
+socket.on('ping', (event) => {
+  console.log(`Ping: ${event.monitorId} [${event.type}]`);
+});
+
+socket.on('monitor-state', (event) => {
+  console.log(`State: ${event.monitorId} → ${event.state}`);
+});
+
+socket.on('incident', (event) => {
+  console.log(`Incident: ${event.incidentId} [${event.eventType}]`);
+});
+
+socket.on('disconnect', (reason) => {
+  console.log(`Disconnected: ${reason}`);
+});
+```
+</Tab>
+
+<Tab value="Browser">
+```html
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+  const socket = io('http://localhost:3001/events', {
+    transports: ['websocket'],
+  });
+
+  socket.on('ping', (event) => {
+    document.getElementById('feed').prepend(
+      Object.assign(document.createElement('div'), {
+        textContent: `${event.type} from ${event.monitorId}`,
+      })
+    );
+  });
+</script>
+```
+</Tab>
+</Tabs>
+
+### Event Payload Shapes
+
+#### Ping Event
+
+```json
+{
+  "monitorId": "uuid",
+  "type": "success",
+  "timestamp": "2026-01-15T10:00:00Z",
+  "sourceIp": "192.168.1.1",
+  "body": "optional payload"
+}
+```
+
+#### Monitor State Event
+
+```json
+{
+  "monitorId": "uuid",
+  "state": "healthy",
+  "lastPingAt": "2026-01-15T10:00:00Z",
+  "nextExpectedAt": "2026-01-15T11:00:00Z",
+  "consecutiveFailures": 0
+}
+```
+
+#### Incident Event
+
+```json
+{
+  "incidentId": "uuid",
+  "monitorId": "uuid",
+  "eventType": "opened",
+  "timestamp": "2026-01-15T10:05:00Z"
+}
+```

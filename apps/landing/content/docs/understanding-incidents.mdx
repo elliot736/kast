@@ -1,0 +1,234 @@
+---
+title: Understanding Incidents
+description: How Kast detects, tracks, and resolves incidents — from missed pings to alert delivery, auto-resolution, and handling flapping jobs.
+---
+
+
+An incident in Kast represents a period when something went wrong with a monitored job. Kast creates incidents automatically when problems are detected and resolves them automatically when your job recovers. Every incident is a durable record with a full timeline of events.
+
+## What Triggers an Incident
+
+There are three ways an incident gets opened.
+
+### Missed ping
+
+This is the most common trigger. Your job was supposed to check in by a certain time. It didn't. The grace period expired. Kast opens an incident.
+
+This catches the cases that are hardest to detect manually: the cron daemon crashed, the server rebooted and nobody re-enabled the job, the Kubernetes CronJob was suspended during a deploy and never resumed.
+
+### Failed ping
+
+Your job ran, but it explicitly reported failure by pinging `/fail`. Kast opens an incident immediately — no waiting for the grace period. The request body (your error message) is attached to the incident.
+
+This is for cases where the job ran but produced an error: the database connection timed out, the API returned a 500, the disk is full.
+
+### Max runtime exceeded
+
+Your job pinged `/start` but never pinged `/success` or `/fail`. The configured max runtime has elapsed. Kast opens an incident because the job appears stuck.
+
+This catches hung processes, deadlocks, infinite loops, and jobs waiting on a resource that will never become available.
+
+<Callout type="info">
+Each trigger type is recorded in the incident so you can see at a glance why the alert fired. "Missed ping" means the job didn't run at all. "Failed ping" means it ran but broke. "Max runtime exceeded" means it started but never finished.
+</Callout>
+
+## Incident States
+
+Every incident moves through a defined set of states.
+
+### Open
+
+The incident was just detected. Alerts are firing. The monitor shows a "Down" badge in the dashboard.
+
+An open incident means: this problem exists and nobody has acknowledged it yet.
+
+### Acknowledged
+
+Someone has seen the alert and is investigating. Acknowledging an incident does two things:
+
+1. Stops escalation — if you have escalation policies, the ack prevents the alert from being sent to the next tier.
+2. Records who acknowledged and when — useful for postmortems.
+
+Acknowledging does **not** resolve the incident. The monitor is still down. Alerts won't re-fire (cooldown applies), but the incident remains open until the job recovers or you manually resolve it.
+
+### Resolved
+
+The problem is fixed. Resolution happens one of two ways:
+
+- **Auto-resolved:** Your job sends a success ping. Kast marks the monitor healthy and resolves all open incidents for that monitor.
+- **Manually resolved:** You click "Resolve" in the dashboard or use the API. This is for cases where the job won't recover on its own (you removed it, it's a one-time job, etc.).
+
+When an incident resolves, Kast records the total downtime — from when the incident was opened to when it was resolved.
+
+## Walking Through an Incident
+
+Here is a complete incident lifecycle for a database backup that runs at 3:00am daily with a 5-minute grace period.
+
+<Steps>
+<Step>
+### Job misses its schedule
+
+It's 3:00am. The backup was supposed to run. The cron daemon on the server crashed after a package update last night. No ping arrives.
+</Step>
+
+<Step>
+### Kast detects the delay
+
+3:01am — Kast's sweep runs. The monitor expected a ping at 3:00am. Grace period expires at 3:05am. Current time is 3:01am. The monitor transitions from **healthy** to **late**. No incident yet — the job is just slow.
+</Step>
+
+<Step>
+### Grace period expires
+
+3:06am — Kast's sweep runs again. It's now past 3:05am. No ping has arrived. The monitor transitions from **late** to **down**. Kast opens an incident with reason "missed ping" and publishes an alert trigger event.
+</Step>
+
+<Step>
+### Alerts fire
+
+3:06am — The alert pipeline processes the trigger. Your alert config says: Slack to `#ops-alerts`, cooldown 30 minutes. No recent alert for this monitor exists. Kast sends:
+
+> **db-backup is down** — missed ping. Expected at 03:00, grace period expired at 03:05.
+
+The message includes a link to the incident in the dashboard.
+</Step>
+
+<Step>
+### You acknowledge
+
+3:18am — You see the Slack message and click "Acknowledge" in the dashboard. The incident moves to **acknowledged**. Escalation stops. Your team knows someone is on it.
+</Step>
+
+<Step>
+### You fix the problem
+
+3:22am — You SSH into the server, find the dead cron daemon, restart it, and manually trigger the backup.
+</Step>
+
+<Step>
+### Job recovers
+
+3:35am — The backup completes and pings `/success`. Kast receives the ping, transitions the monitor to **healthy**, and auto-resolves the incident. Total downtime: 35 minutes (3:00am to 3:35am).
+</Step>
+
+<Step>
+### Record is complete
+
+The incident now has a full timeline: when the ping was expected, when the grace period expired, when the alert was sent, when you acknowledged, when it resolved. This is stored permanently and visible in the dashboard.
+</Step>
+</Steps>
+
+## What You See in the Dashboard
+
+When an incident is open, the dashboard shows several things:
+
+**Monitor list** — The affected monitor has a red "Down" badge. Healthy monitors show green. Late monitors show yellow.
+
+**Incidents page** — A table of open incidents with columns: monitor name, reason (missed ping / failed ping / max runtime), time detected, duration so far, missed ping count, and status (open / acknowledged).
+
+**Incident detail** — Click into an incident to see the full event timeline:
+
+- 03:00:00 — Ping expected (based on schedule `0 3 * * *`)
+- 03:05:00 — Grace period expired, no ping received
+- 03:05:01 — Incident opened, reason: missed ping
+- 03:05:02 — Alert dispatched to Slack `#ops-alerts`
+- 03:05:03 — Alert delivered successfully
+- 03:18:44 — Incident acknowledged by omar@example.com
+- 03:35:12 — Success ping received
+- 03:35:12 — Incident auto-resolved, downtime: 35m 12s
+
+## Alert Delivery
+
+When an incident triggers an alert, here is what Kast does:
+
+<Steps>
+<Step>
+### Check alert configs
+
+Kast looks up all alert configurations that apply to this monitor. You might have Slack for the team and email for the on-call engineer.
+</Step>
+
+<Step>
+### Check cooldown
+
+If an alert was already sent for this monitor recently (within the cooldown period), Kast skips sending another one. This prevents spam during extended outages. A typical cooldown is 30 minutes — you get one alert when the job goes down, not one every 60 seconds.
+</Step>
+
+<Step>
+### Dispatch to channels
+
+Kast sends the alert to each configured channel: Slack, Discord, email, webhook, or any other integration you've set up.
+</Step>
+
+<Step>
+### Handle delivery failures
+
+If delivery fails (Slack is down, webhook times out), Kast retries with exponential backoff:
+
+- 30 seconds
+- 2 minutes
+- 15 minutes
+- 1 hour
+- 6 hours
+
+If all retries fail, the alert goes to the dead letter queue. You can inspect failed deliveries in the dashboard and retry them manually.
+</Step>
+</Steps>
+
+<ImageZoom src="/diagrams/alerts.png" width={1416} height={1085} alt="Alert dispatch flow showing trigger evaluation, cooldown check, channel dispatch, retry logic, and dead letter queue" />
+
+<Callout type="warn">
+If you see alerts in the dead letter queue, check your integration credentials. A common cause is an expired Slack webhook URL or a firewall blocking outbound requests from the Kast server.
+</Callout>
+
+## Auto-Resolution
+
+When your job recovers and sends a success ping, Kast automatically:
+
+1. Transitions the monitor from **down** to **healthy**
+2. Resolves all open incidents for that monitor
+3. Records the downtime duration (from incident open to resolution)
+4. Publishes a resolution event to the event log
+5. Sends a recovery notification if configured ("db-backup is back up, downtime was 35 minutes")
+
+You don't need to manually close incidents when your job recovers. Kast handles it.
+
+## Common Patterns
+
+### Flapping jobs
+
+Some jobs go up and down repeatedly — a health check that passes, fails, passes, fails. If you alert on every transition, you get flooded with notifications.
+
+To handle this, configure the **consecutive failure threshold**. Setting it to 3 means Kast waits for 3 consecutive missed pings before opening an incident. One-off failures are recorded as events but don't trigger alerts.
+
+### Slow jobs
+
+If your backup sometimes takes 2 hours and sometimes takes 4 hours, set the grace period generously to avoid false alarms on the schedule. Use **max runtime** separately to catch truly stuck jobs — for example, set max runtime to 8 hours to alert if the backup has been running all night.
+
+Don't confuse grace period (how late the job can start) with max runtime (how long the job can run).
+
+### Maintenance windows
+
+Before deploying new code or doing server maintenance, **pause** the monitor in the dashboard. This prevents false alarms during planned downtime. When maintenance is done, **resume** the monitor. Any pings sent while paused are still recorded — they just don't trigger incidents.
+
+<Callout type="info">
+Pausing a monitor does not affect uptime calculations. Paused time is excluded from the uptime percentage so your SLA numbers stay accurate.
+</Callout>
+
+### Jobs that run on business days only
+
+If your job runs Monday through Friday, use a cron expression that reflects that: `0 3 * * 1-5`. Kast won't expect pings on Saturday or Sunday, so you won't get false alerts on weekends.
+
+## Next Steps
+
+<Cards>
+<Card title="Alerts" href="/docs/alerts">
+Configure Slack, Discord, email, and webhook alert channels.
+</Card>
+<Card title="Dead Letters" href="/docs/dead-letters">
+Inspect and retry failed alert deliveries.
+</Card>
+<Card title="Incident Replay" href="/docs/incident-replay">
+Replay incident timelines and backtest alert rules.
+</Card>
+</Cards>

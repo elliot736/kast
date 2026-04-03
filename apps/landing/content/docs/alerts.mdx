@@ -1,0 +1,363 @@
+---
+title: Alert Channels
+description: Configure Slack, Discord, email, webhook, PagerDuty, and Telegram alerts with per-monitor routing, cooldowns, retry with exponential backoff, and dead letter queue.
+---
+
+
+When an incident opens, Kast dispatches alerts to all enabled alert configurations for that monitor. Kast supports 6 channels, each with per-monitor routing, cooldown enforcement, threshold-based triggering, and automatic retry with dead letter fallback.
+
+## Alert Delivery Sequence
+
+<ImageZoom src="/diagrams/alerts.png" width={1416} height={1085} alt="Alert delivery sequence showing dispatch from incident through channel delivery, retry with exponential backoff, and dead letter queue" />
+
+The alert lifecycle:
+
+1. **Incident Service** opens an incident and publishes to `alert-triggers`.
+2. **Notify Service** consumes the trigger, looks up all enabled alert configs for the monitor, checks cooldown and threshold conditions, and attempts delivery.
+3. On success, the delivery is recorded in PostgreSQL with status `delivered`.
+4. On failure, the delivery is re-published to `alert-retries` with a `retryAfter` timestamp.
+5. The retry consumer picks it up at the scheduled time and retries.
+6. After 5 failed attempts, the alert is published to `alert-deadletter`.
+
+## Creating an Alert Configuration
+
+```bash
+curl -X POST http://localhost:3001/api/v1/alert-configs \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "monitorId": "MONITOR_UUID",
+    "channel": "slack",
+    "destination": "https://hooks.slack.com/services/T.../B.../xxx",
+    "cooldownMinutes": 30,
+    "thresholdFailures": 1,
+    "isEnabled": true
+  }'
+```
+
+### Alert Config Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `monitorId` | string | required | UUID of the monitor this config belongs to |
+| `channel` | string | required | One of: `slack`, `discord`, `email`, `webhook`, `pagerduty`, `telegram` |
+| `destination` | string | required | Channel-specific target (webhook URL, email address, chat ID, routing key) |
+| `config` | object | `{}` | Channel-specific extra configuration (headers, bot token, SMTP settings) |
+| `cooldownMinutes` | number | `30` | Minimum minutes between alerts for this config |
+| `thresholdFailures` | number | `1` | Number of consecutive failures before alerting |
+| `isEnabled` | boolean | `true` | Enable or disable this config without deleting it |
+
+## Channel Reference
+
+<Tabs items={["Slack", "Discord", "Email", "Webhook", "PagerDuty", "Telegram"]}>
+<Tab value="Slack">
+Send rich Block Kit messages to a Slack channel via an Incoming Webhook.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"slack"` |
+| `destination` | Slack Incoming Webhook URL |
+
+**Setup:**
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create an app (or use an existing one).
+2. Enable **Incoming Webhooks** under Features.
+3. Add a new webhook to a channel and copy the URL.
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "slack",
+  "destination": "https://hooks.slack.com/services/T00000/B00000/XXXXXXXX"
+}
+```
+
+Kast sends Slack messages using [Block Kit](https://api.slack.com/block-kit) format with:
+
+- Monitor name and status as the header
+- Incident reason, timestamp, and consecutive failure count as fields
+- Color-coded attachment (red for down, yellow for late)
+- Link to the monitor in the dashboard
+</Tab>
+
+<Tab value="Discord">
+Send embed messages to a Discord channel via a webhook.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"discord"` |
+| `destination` | Discord webhook URL |
+
+**Setup:**
+
+1. In your Discord server, go to **Channel Settings > Integrations > Webhooks**.
+2. Click **New Webhook**, choose a channel, and copy the URL.
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "discord",
+  "destination": "https://discord.com/api/webhooks/123456/abcdef"
+}
+```
+
+Kast sends Discord messages as embeds with:
+
+- Color-coded sidebar (red `0xFF0000` for down, yellow `0xFFFF00` for late)
+- Fields for monitor name, status, reason, and timestamp
+- Footer with "Kast Monitoring"
+</Tab>
+
+<Tab value="Email">
+Send alert emails via SMTP.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"email"` |
+| `destination` | Recipient email address |
+| `config.from` | Sender address (optional) |
+| `config.smtpHost` | SMTP server hostname (optional) |
+| `config.smtpPort` | SMTP port (optional) |
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "email",
+  "destination": "oncall@example.com",
+  "config": {
+    "from": "kast@example.com",
+    "smtpHost": "smtp.example.com",
+    "smtpPort": 587
+  }
+}
+```
+
+Email is currently a stub in v1, ready for nodemailer integration. The alert payload is formatted as a plain-text email with monitor name, status, reason, and timestamp.
+</Tab>
+
+<Tab value="Webhook">
+Send a generic HTTP POST to any URL with the full alert trigger payload as JSON.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"webhook"` |
+| `destination` | Target URL |
+| `config.headers` | Custom HTTP headers (optional) |
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "webhook",
+  "destination": "https://example.com/alerts",
+  "config": {
+    "headers": {
+      "Authorization": "Bearer my-token",
+      "X-Custom-Header": "value"
+    }
+  }
+}
+```
+
+The webhook POST body:
+
+```json
+{
+  "monitorId": "uuid",
+  "monitorName": "DB Backup",
+  "monitorSlug": "db-backup",
+  "incidentId": "uuid",
+  "status": "down",
+  "reason": "Ping missed",
+  "consecutiveFailures": 3,
+  "timestamp": "2026-03-24T03:10:00.000Z"
+}
+```
+
+Custom headers from `config.headers` are merged into the request. Use this for integrating with internal alerting systems, ticketing platforms, or any HTTP endpoint.
+</Tab>
+
+<Tab value="PagerDuty">
+Create incidents in PagerDuty via the Events API v2.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"pagerduty"` |
+| `destination` | PagerDuty Events API v2 routing key (integration key) |
+
+**Setup:**
+
+1. In PagerDuty, create a service or use an existing one.
+2. Add an **Events API v2** integration to the service.
+3. Copy the **Integration Key** (also called routing key).
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "pagerduty",
+  "destination": "your-pagerduty-routing-key"
+}
+```
+
+Kast sends PagerDuty events with:
+
+- `routing_key`: the destination value
+- `event_action`: `trigger` for new incidents, `resolve` when the monitor recovers
+- `dedup_key`: the Kast incident UUID (prevents duplicate PagerDuty incidents for the same Kast incident)
+- `payload.summary`: monitor name and reason
+- `payload.severity`: `critical` for down, `warning` for late
+- `payload.source`: Kast instance URL
+</Tab>
+
+<Tab value="Telegram">
+Send alerts to a Telegram chat via the Bot API with MarkdownV2 formatting.
+
+| Field | Value |
+|-------|-------|
+| `channel` | `"telegram"` |
+| `destination` | Telegram chat ID (e.g., `"-1001234567890"`) |
+| `config.botToken` | Telegram Bot API token |
+
+**Setup:**
+
+1. Create a bot via [@BotFather](https://t.me/botfather) and copy the token.
+2. Add the bot to your group chat.
+3. Get the chat ID by sending a message to the group, then calling `https://api.telegram.org/bot<token>/getUpdates` and finding the `chat.id`.
+
+```json
+{
+  "monitorId": "MONITOR_UUID",
+  "channel": "telegram",
+  "destination": "-1001234567890",
+  "config": {
+    "botToken": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+  }
+}
+```
+
+Kast sends Telegram messages using MarkdownV2 formatting:
+
+```
+*Monitor Down: DB Backup*
+
+*Status:* `down`
+*Reason:* Ping missed
+*Time:* 2026\-03\-24T03:10:00Z
+*Consecutive Failures:* 3
+```
+</Tab>
+</Tabs>
+
+## Cooldown Enforcement
+
+<Callout type="info">
+The `cooldownMinutes` field prevents alert fatigue. Before dispatching an alert, the notify service checks the `last_sent` timestamp for the alert config. If `(now - last_sent) < cooldownMinutes`, the dispatch is skipped. This means with `cooldownMinutes: 30`, you will receive at most one alert per 30 minutes per alert config, even if the monitor repeatedly transitions to `down`. Cooldown is per alert config, not per monitor -- if you have two Slack configs for the same monitor with different cooldowns, they operate independently.
+</Callout>
+
+## Threshold Failures
+
+The `thresholdFailures` field (default 1) controls how many consecutive failures must occur before an alert is sent:
+
+```
+IF consecutiveFailures < thresholdFailures → skip dispatch
+```
+
+Use this to suppress alerts for transient issues. Setting `thresholdFailures: 3` means the monitor must be down for 3 consecutive evaluation cycles before you are alerted.
+
+## Retry Strategy
+
+When an alert delivery fails (network error, remote server returns 5xx, timeout), Kast retries with exponential backoff:
+
+| Attempt | Delay After Failure |
+|---------|-------------------|
+| 1 (initial) | Immediate |
+| 2 | 30 seconds |
+| 3 | 2 minutes |
+| 4 | 15 minutes |
+| 5 | 1 hour |
+| 6 (final) | 6 hours |
+
+After the 6th attempt (5 retries), the alert is moved to the dead letter queue.
+
+Failed deliveries are published to the `alert-retries` topic with a `retryAfter` timestamp. The retry consumer group (`kast-notify-retries`) polls this topic and executes retries when the scheduled time arrives.
+
+## Dead Letter Queue
+
+<Callout type="error">
+Alerts that exhaust all retry attempts are published to the `alert-deadletter` topic and retained for 30 days. If you see alerts landing in the dead letter queue, check your channel configuration -- the most common causes are revoked tokens, deleted webhooks, and unreachable SMTP servers. See [Dead Letters](/docs/dead-letters) for debugging guides per channel.
+</Callout>
+
+### Inspecting Dead Letters
+
+```bash
+# List all dead letters
+curl http://localhost:3001/api/v1/dead-letters \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+```json
+[
+  {
+    "id": "uuid",
+    "monitorId": "uuid",
+    "monitorName": "DB Backup",
+    "channel": "slack",
+    "destination": "https://hooks.slack.com/...",
+    "attempts": 5,
+    "lastError": "HTTP 502 Bad Gateway",
+    "lastAttemptAt": "2026-03-24T09:10:00.000Z",
+    "createdAt": "2026-03-24T03:10:00.000Z"
+  }
+]
+```
+
+### Retrying Dead Letters
+
+```bash
+# One-click retry
+curl -X POST http://localhost:3001/api/v1/dead-letters/DEAD_LETTER_ID/retry \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+This re-publishes the alert to `alert-triggers` for a fresh delivery attempt with a full retry cycle.
+
+### Dead Letter UI Page
+
+The dashboard includes a dedicated dead letter page that shows:
+
+- All failed deliveries with channel, destination, attempt count, and last error
+- Timestamps for creation and last attempt
+- One-click retry button per dead letter
+- Bulk retry option
+
+## Alert Log
+
+Every delivery attempt (successful or failed) is recorded in the `alert_deliveries` PostgreSQL table. Query the delivery history for any monitor:
+
+```bash
+curl 'http://localhost:3001/api/v1/monitors/MONITOR_ID/pings?type=alert' \
+  -H 'x-api-key: kst_YOUR_KEY'
+```
+
+Each record includes: channel, destination, status (`delivered`, `failed`, `retrying`, `dead`), attempt count, error message (if any), and timestamps.
+
+## Managing Alert Configurations
+
+```bash
+# List all configs
+curl http://localhost:3001/api/v1/alert-configs \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# List configs for a specific monitor
+curl 'http://localhost:3001/api/v1/alert-configs?monitorId=MONITOR_UUID' \
+  -H 'x-api-key: kst_YOUR_KEY'
+
+# Update a config (e.g., disable it)
+curl -X PATCH http://localhost:3001/api/v1/alert-configs/CONFIG_ID \
+  -H 'x-api-key: kst_YOUR_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"isEnabled": false}'
+
+# Delete a config
+curl -X DELETE http://localhost:3001/api/v1/alert-configs/CONFIG_ID \
+  -H 'x-api-key: kst_YOUR_KEY'
+```

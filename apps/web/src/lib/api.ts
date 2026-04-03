@@ -75,18 +75,12 @@ export interface Job {
   schedule: string;
   timezone: string | null;
   status: "active" | "paused" | "disabled";
-  url: string;
-  method: string | null;
-  headers: Record<string, string>;
-  body: string | null;
-  timeoutSeconds: number | null;
   maxRetries: number | null;
   retryDelaySeconds: number | null;
   retryBackoffMultiplier: number | null;
   retryMaxDelaySeconds: number | null;
   concurrencyLimit: number | null;
   concurrencyPolicy: string | null;
-  successStatusCodes: number[] | null;
   monitorId: string | null;
   teamId: string | null;
   tags: string[];

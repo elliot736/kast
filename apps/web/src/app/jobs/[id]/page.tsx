@@ -85,9 +85,6 @@ interface JobEditForm {
   name: string;
   schedule: string;
   timezone: string;
-  url: string;
-  method: string;
-  timeoutSeconds: string;
   maxRetries: string;
   retryDelaySeconds: string;
   concurrencyLimit: string;
@@ -188,9 +185,6 @@ export default function JobDetailPage() {
     name: "",
     schedule: "",
     timezone: "",
-    url: "",
-    method: "",
-    timeoutSeconds: "",
     maxRetries: "",
     retryDelaySeconds: "",
     concurrencyLimit: "",
@@ -199,7 +193,6 @@ export default function JobDetailPage() {
   });
   const [editError, setEditError] = useState<string | null>(null);
   const [editSaving, setEditSaving] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -350,9 +343,6 @@ export default function JobDetailPage() {
       name: job.name,
       schedule: job.schedule ?? "",
       timezone: job.timezone ?? "",
-      url: job.url,
-      method: job.method ?? "POST",
-      timeoutSeconds: job.timeoutSeconds?.toString() ?? "",
       maxRetries: job.maxRetries?.toString() ?? "",
       retryDelaySeconds: job.retryDelaySeconds?.toString() ?? "",
       concurrencyLimit: job.concurrencyLimit?.toString() ?? "",
@@ -371,12 +361,12 @@ export default function JobDetailPage() {
       const body: Record<string, unknown> = {
         name: editForm.name,
         schedule: editForm.schedule,
-        url: editForm.url,
-        method: editForm.method,
+        
+        
       };
       if (editForm.timezone) body.timezone = editForm.timezone;
-      if (editForm.timeoutSeconds)
-        body.timeoutSeconds = Number(editForm.timeoutSeconds);
+      if (false)
+        
       if (editForm.maxRetries)
         body.maxRetries = Number(editForm.maxRetries);
       if (editForm.retryDelaySeconds)
@@ -404,13 +394,6 @@ export default function JobDetailPage() {
     }
   };
 
-  const handleCopyEndpoint = () => {
-    if (!job) return;
-    navigator.clipboard.writeText(job.url);
-    setCopied(true);
-    toast.success("Endpoint URL copied to clipboard");
-    setTimeout(() => setCopied(false), 2000);
-  };
 
   const handleTrigger = async () => {
     if (!job) return;
@@ -588,50 +571,18 @@ export default function JobDetailPage() {
 
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Endpoint URL</Label>
+                    <Label className="text-xs text-muted-foreground">Timezone</Label>
                     <Input
-                      value={editForm.url}
+                      value={editForm.timezone}
                       onChange={(e) =>
-                        setEditForm((f) => ({ ...f, url: e.target.value }))
+                        setEditForm((f) => ({ ...f, timezone: e.target.value }))
                       }
-                      required
+                      placeholder="UTC"
                     />
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">Method</Label>
-                      <Input
-                        value={editForm.method}
-                        onChange={(e) =>
-                          setEditForm((f) => ({ ...f, method: e.target.value }))
-                        }
-                        placeholder="POST"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label className="text-xs text-muted-foreground">Timezone</Label>
-                      <Input
-                        value={editForm.timezone}
-                        onChange={(e) =>
-                          setEditForm((f) => ({ ...f, timezone: e.target.value }))
-                        }
-                        placeholder="UTC"
-                      />
-                    </div>
                   </div>
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-4">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs text-muted-foreground">Timeout (seconds)</Label>
-                    <Input
-                      type="number"
-                      value={editForm.timeoutSeconds}
-                      onChange={(e) =>
-                        setEditForm((f) => ({ ...f, timeoutSeconds: e.target.value }))
-                      }
-                    />
-                  </div>
                   <div className="space-y-1.5">
                     <Label className="text-xs text-muted-foreground">Max Retries</Label>
                     <Input
@@ -705,33 +656,6 @@ export default function JobDetailPage() {
           </Card>
         </motion.div>
       )}
-
-      {/* Endpoint URL */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm">Endpoint URL</CardTitle>
-          <CardDescription>The URL that gets called on each job run</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 text-xs font-mono bg-background border border-border rounded-lg px-4 py-2.5 overflow-x-auto text-muted-foreground">
-              {job.method ?? "POST"} {job.url}
-            </code>
-            <Button
-              variant="outline"
-              size="icon"
-              onClick={handleCopyEndpoint}
-              className="shrink-0"
-            >
-              {copied ? (
-                <Check className="size-3.5 text-alive" />
-              ) : (
-                <Copy className="size-3.5" />
-              )}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* Stats Cards */}
       <motion.div
@@ -864,18 +788,6 @@ export default function JobDetailPage() {
               <span className="text-muted-foreground">Timezone:</span>
               <span>{job.timezone ?? "UTC"}</span>
             </div>
-            <div className="flex items-center gap-2 col-span-2">
-              <Zap className="size-3.5 text-muted-foreground" />
-              <span className="text-muted-foreground">Endpoint:</span>
-              <span className="font-mono text-xs">
-                {job.method ?? "POST"} {job.url}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Timer className="size-3.5 text-muted-foreground" />
-              <span className="text-muted-foreground">Timeout:</span>
-              <span>{job.timeoutSeconds ?? 30}s</span>
-            </div>
             {job.tags.length > 0 && (
               <div className="flex items-center gap-2">
                 <span className="text-muted-foreground">Tags:</span>
@@ -929,14 +841,6 @@ export default function JobDetailPage() {
               limit={job.concurrencyLimit ?? 1}
               policy={job.concurrencyPolicy ?? "queue"}
             />
-            {job.successStatusCodes && (
-              <div className="text-sm">
-                <span className="text-muted-foreground">Success codes:</span>{" "}
-                <span className="font-mono text-xs">
-                  {job.successStatusCodes.join(", ")}
-                </span>
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>

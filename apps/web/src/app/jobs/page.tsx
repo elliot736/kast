@@ -411,7 +411,7 @@ function JobsPage() {
       header: "URL",
       cell: ({ row }) => (
         <span className="font-mono text-xs text-muted-foreground truncate max-w-[200px] block">
-          {row.original.method ?? "POST"} {row.original.url}
+          {row.original.schedule}
         </span>
       ),
     },

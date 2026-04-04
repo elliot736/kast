@@ -7,6 +7,16 @@ Workflows are DAG-based execution pipelines attached to a job. Each node in the 
 
 Execution is **durable** -- if a workflow is sleeping or waiting, it survives process restarts. The engine uses replay-based memoization: completed step results are stored in the database, and on resume the engine skips already-completed steps.
 
+### Visual Workflow Canvas
+
+Build and edit workflows visually with the drag-and-drop DAG canvas:
+
+<video src="https://github.com/elliot736/kast/raw/main/docs/demos/04-dag-workflow-canvas.mp4" controls width="100%"></video>
+
+**Deep dive** — node configuration, condition branching, and multi-pipeline examples:
+
+<video src="https://github.com/elliot736/kast/raw/main/docs/demos/08-workflow-canvas-deep-dive.mp4" controls width="100%"></video>
+
 ## Node Types
 
 | Type | Description |

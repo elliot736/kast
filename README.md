@@ -6,6 +6,59 @@ Kast watches your cron jobs, scheduled tasks, and data pipelines. When a job doe
 
 Built on Redpanda (Kafka-compatible), every event is durable and replayable. No polling — real-time streaming to your dashboard.
 
+## Demo
+
+### Dashboard Overview
+
+https://github.com/elliot736/kast/raw/main/docs/demos/01-general-overview.mp4
+
+<details>
+<summary>See all feature demos</summary>
+
+### Monitors — Heartbeat Monitoring
+
+Track cron jobs and scheduled tasks with 5-field cron or interval-based scheduling, grace periods, and health status tracking.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/02-monitors.mp4
+
+### Jobs — Scheduled HTTP Execution
+
+Configure jobs with retry policies, concurrency control, and automatic scheduling.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/03-jobs.mp4
+
+### DAG Workflow Canvas
+
+Build complex multi-step pipelines with a visual drag-and-drop canvas. Supports HTTP requests, sleep nodes, conditional branching, parallel fan-out, child job spawning, and webhook wait nodes — all with durable replay-based execution.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/04-dag-workflow-canvas.mp4
+
+### Workflow Canvas — Deep Dive
+
+Explore the workflow editor in detail: node configuration panels, condition branching (true/false paths), webhook wait nodes, auto-layout, and the full ETL pipeline and canary deployment examples.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/08-workflow-canvas-deep-dive.mp4
+
+### Incidents
+
+Automatic incident detection when pings are late or jobs fail, with acknowledgment and resolution tracking.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/05-incidents.mp4
+
+### Alert Configuration
+
+Route alerts to Slack, Discord, PagerDuty, email, webhooks, or Telegram with per-monitor routing, cooldowns, and failure thresholds.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/06-alerts.mp4
+
+### Teams & Settings
+
+Organize monitors and jobs by team with isolated access and team-scoped API keys.
+
+https://github.com/elliot736/kast/raw/main/docs/demos/07-settings-teams.mp4
+
+</details>
+
 ## Quickstart
 
 ```bash

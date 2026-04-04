@@ -6,6 +6,10 @@ description: Configure Slack, Discord, email, webhook, PagerDuty, and Telegram a
 
 When an incident opens, Kast dispatches alerts to all enabled alert configurations for that monitor. Kast supports 6 channels, each with per-monitor routing, cooldown enforcement, threshold-based triggering, and automatic retry with dead letter fallback.
 
+### Alert Configuration Demo
+
+<video src="https://github.com/elliot736/kast/raw/main/docs/demos/06-alerts.mp4" controls width="100%"></video>
+
 ## Alert Delivery Sequence
 
 <ImageZoom src="/diagrams/alerts.png" width={1416} height={1085} alt="Alert delivery sequence showing dispatch from incident through channel delivery, retry with exponential backoff, and dead letter queue" />

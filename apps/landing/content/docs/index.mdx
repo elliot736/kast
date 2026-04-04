@@ -6,6 +6,12 @@ description: Kast is an open-source, event-stream-native monitoring platform for
 
 Kast is an open-source, self-hosted monitoring platform for cron jobs, scheduled tasks, background workers, and data pipelines. Your jobs send heartbeat pings over HTTP. If a ping arrives late, exceeds its maximum runtime, or explicitly reports a failure, Kast opens an incident and alerts you through any combination of six channels.
 
+## Demo
+
+See Kast in action — the full dashboard with monitors, jobs, DAG workflows, incidents, and alert configuration:
+
+<video src="https://github.com/elliot736/kast/raw/main/docs/demos/01-general-overview.mp4" controls width="100%"></video>
+
 ## Why Kast Exists
 
 Cron jobs fail silently. A backup script stops running, an ETL pipeline hangs, a queue worker crashes at 3 AM -- and nobody notices until a customer reports missing data or a database runs out of space. The job ran for months without issue, so nobody thought to check.

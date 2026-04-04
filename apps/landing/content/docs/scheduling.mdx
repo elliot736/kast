@@ -6,6 +6,10 @@ description: How Kast evaluates cron and interval schedules, the 60-second sweep
 
 Kast monitors jobs by expecting pings at specific times. When a ping does not arrive, the schedule evaluator determines whether the monitor is late, down, or has exceeded its maximum runtime.
 
+### Monitors in Action
+
+<video src="https://github.com/elliot736/kast/raw/main/docs/demos/02-monitors.mp4" controls width="100%"></video>
+
 ## Monitor State Machine
 
 <ImageZoom src="/diagrams/states.png" width={772} height={594} alt="Monitor state machine showing healthy, late, down, and paused states with all transition triggers" />
